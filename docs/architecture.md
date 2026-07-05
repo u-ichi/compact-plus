@@ -55,6 +55,15 @@ Codex CLI documents:
 
 Codex hooks are command-only in the checked manual. `PreCompact` and `PostCompact` hooks expose fields such as `turn_id` and `trigger`, where `trigger` is `manual` or `auto`. Plain text stdout is ignored for those events, while JSON output can use common hook fields such as `continue`.
 
+The default compaction prompt shipped by Codex is deliberately handoff-oriented. The template at [`codex-rs/prompts/templates/compact/prompt.md`](https://github.com/openai/codex/blob/main/codex-rs/prompts/templates/compact/prompt.md) frames compaction as "CONTEXT CHECKPOINT COMPACTION" and requires the summarizing LLM to include four sections:
+
+1. Current progress and key decisions made
+2. Important context, constraints, or user preferences
+3. What remains to be done (clear next steps)
+4. Any critical data, examples, or references needed to continue
+
+This is the built-in handoff engineering that users of Codex get without any configuration.
+
 The OpenAI Responses API also has server-side context compaction through `context_management` and the `/responses/compact` endpoint. That API returns an encrypted compaction item and is not the same mechanism as Claude Code plugin hooks.
 
 ## 4. Compaction Capability Comparison
@@ -70,9 +79,10 @@ The OpenAI Responses API also has server-side context compaction through `contex
 | Threshold warn notification | Statusline percentage only | Requires custom implementation | Explicit warn marker plus a reminder hook |
 | Recitation of current focus (Active Plan / Current Phase / recent Session Decision) | None | None | Reminder hook injects a three-line state recitation as `additionalContext` |
 | Manual state save skill | None | None | Provides the `/compact-plus` skill |
+| Structured handoff prompt for the compaction LLM | Not published; treated as generic summarization | Ships a "CONTEXT CHECKPOINT COMPACTION" prompt that requires progress/decisions, context/constraints, remaining work, and critical data/references as sections | Leaves the compaction summary as-is; instead persists a 10-section state file outside the compacted context and injects it back on resume |
 | Replacing the compaction prompt itself | Not possible | Yes, via `compact_prompt` and `experimental_compact_prompt_file` | Out of scope by design (uses hook-side state capture instead) |
 
-Replacing the compaction prompt itself is unique to Codex. However, on the axis of "session continuity around compaction," the additional capabilities provided by compact-plus lift Claude Code above the Codex baseline.
+Codex ships two distinct advantages here: it lets users replace the compaction prompt, and its default already applies structured handoff engineering. compact-plus does not enter the compaction prompt at all. Instead it places the handoff structure in an external state file that the recovery hook re-injects on the next user prompt. On the axis of "session continuity around compaction," this indirection lets Claude Code + compact-plus match or exceed the Codex baseline while staying inside Claude Code's documented extension surface.
 
 ## 5. Runtime Flow
 

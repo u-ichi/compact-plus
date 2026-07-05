@@ -55,6 +55,15 @@ Codex CLI 公式 docs で確認できる surface:
 
 確認した Codex manual では、hook は command-only とされている。`PreCompact` / `PostCompact` hook には `turn_id` と `trigger` などが渡され、`trigger` は `manual` または `auto`。これらの event では plain text stdout は無視され、JSON output では `continue` などの common hook field が使える。
 
+Codex が同梱する default の compaction prompt は明示的に handoff を指向している。テンプレート [`codex-rs/prompts/templates/compact/prompt.md`](https://github.com/openai/codex/blob/main/codex-rs/prompts/templates/compact/prompt.md) は圧縮を "CONTEXT CHECKPOINT COMPACTION" と位置づけ、圧縮 LLM に以下 4 セクションを含めるよう指示する:
+
+1. 現在の進捗と主要な意思決定
+2. 重要な context / 制約 / user preferences
+3. 残作業 (次に取るべき step)
+4. 継続に必要な重要データ / 例 / 参照
+
+Codex ユーザーは無設定でこの handoff 設計の恩恵を受ける。
+
 OpenAI Responses API にも `context_management` と `/responses/compact` endpoint による server-side context compaction がある。この API は encrypted compaction item を返すもので、Claude Code plugin hook とは別の仕組み。
 
 ## 4. compact 能力比較
@@ -70,9 +79,10 @@ OpenAI Responses API にも `context_management` と `/responses/compact` endpoi
 | 閾値到達 warn 通知 | statusline に % 表示のみ | 独自実装が必要 | warn marker + reminder hook で明示的に通知 |
 | 直近状態の recitation (Active Plan / Current Phase / 直近 Session Decision) | なし | なし | reminder hook が state 3 行を `additionalContext` 注入 |
 | 手動 state 保存 skill | なし | なし | `/compact-plus` skill を提供 |
+| 圧縮 LLM への handoff 構造化指示 | 公式には非公開、汎用 summarization 扱い | "CONTEXT CHECKPOINT COMPACTION" prompt を built-in で搭載、進捗/意思決定・context/制約・残作業・重要データ の 4 セクションを要求 | 圧縮 summary 自体は Claude Code に任せ、代わりに 10 見出し state file を圧縮対象の外に永続化し、圧縮後 hook で復元する |
 | Compaction prompt 自体の差替 | 不可 | `compact_prompt` / `experimental_compact_prompt_file` で可 | 対象外 (compaction prompt ではなく hook 経路で state 保存する設計) |
 
-Compaction prompt そのものの差替は Codex 独自の柔軟性。ただし「圧縮前後のセッション継続体験」という観点では、compact-plus が上乗せする能力により Claude Code + compact-plus が Codex baseline を上回る。
+Codex は 2 つの独自優位を持つ: user が compaction prompt を差し替えられる点と、default 自体が handoff 構造を持つ点。compact-plus は compaction prompt には一切手を入れず、代わりに handoff 構造を圧縮の外に置いた state file に持たせ、圧縮後の user prompt で復元させる。この間接化により Claude Code の公式拡張 surface に留まりながら Codex baseline に匹敵ないし超えるセッション継続を実現している。
 
 ## 5. Runtime flow
 
