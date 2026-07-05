@@ -70,7 +70,7 @@ The OpenAI Responses API also has server-side context compaction through `contex
 
 | Capability | Claude Code (baseline) | Codex CLI (built-in) | Claude Code + compact-plus |
 |---|---|---|---|
-| Structured pre-compaction state file | None | None (`compact_prompt` allows free-form text but no structural guarantee) | 10-section state file written to disk |
+| Structured pre-compaction state file | None | None (the rollout file preserves the whole transcript but is not a structured state artifact) | 10-section state file written to disk |
 | Transcript backup safety net | None (transcript JSONL persists in place) | Full rollout file kept in `$CODEX_HOME/sessions` | Versioned backup copies under `~/.claude/backups/transcripts/` |
 | Automatic post-compaction recovery injection | None | Possible only via a user-authored SessionStart(source=compact) hook | Automatic through `UserPromptSubmit` |
 | Recall of skills invoked earlier | None | None | Restored from the `## Skills Invoked` section of the state file |

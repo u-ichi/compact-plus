@@ -70,7 +70,7 @@ OpenAI Responses API にも `context_management` と `/responses/compact` endpoi
 
 | 能力 | Claude Code (baseline) | Codex CLI (built-in) | Claude Code + compact-plus |
 |---|---|---|---|
-| 圧縮前の構造化 state file | なし | なし (`compact_prompt` で自由記述可能だが構造化保証は無し) | 10 見出し state file を外部保存 |
+| 圧縮前の構造化 state file | なし | なし (rollout file は transcript 全保持だが構造化された state artifact ではない) | 10 見出し state file を外部保存 |
 | Transcript backup safety net | なし (transcript JSONL 実体は残る) | rollout file が全履歴保持 (`$CODEX_HOME/sessions`) | `~/.claude/backups/transcripts/` に世代管理 backup |
 | 圧縮後の recovery 自動注入 | なし | 自作の SessionStart(source=compact) hook で可能 | `UserPromptSubmit` で自動注入 |
 | 呼び出し済み skill の復元 | なし | なし | state file の `## Skills Invoked` から復元 |
