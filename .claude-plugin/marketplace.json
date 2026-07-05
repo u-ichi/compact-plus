@@ -5,13 +5,13 @@
   },
   "metadata": {
     "description": "Local marketplace for the compact-plus plugin.",
-    "version": "1.0.1"
+    "version": "1.0.2"
   },
   "plugins": [
     {
       "name": "compact-plus",
       "description": "Preserve Claude Code session state before and after context compaction.",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "author": {
         "name": "u1"
       },

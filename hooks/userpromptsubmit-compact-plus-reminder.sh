@@ -73,7 +73,7 @@ section_last_line() {
   ' "$file" 2>/dev/null
 }
 
-CTX="[COMPACT PLUS REMINDER] context usage reached ${CTX_PCT}%."
+CTX="[COMPACT REMINDER] context usage reached ${CTX_PCT}%."
 if [[ -f "$STATE_FILE" ]]; then
   ACTIVE_PLAN=$(section_first_line "## Active Plan" "$STATE_FILE")
   CURRENT_PHASE=$(section_first_line "## Current Phase" "$STATE_FILE")
@@ -83,10 +83,9 @@ if [[ -f "$STATE_FILE" ]]; then
   CTX+=$'\n'"- Current Phase: ${CURRENT_PHASE:-Not verified}"
   CTX+=$'\n'"- Recent Session Decision: ${SESSION_DECISION:-Not verified}"
 else
-  CTX+=$'\n'"State recitation: no compact-plus state file is available for this session."
+  CTX+=$'\n'"State recitation: no pre-compaction state file is available for this session."
 fi
 CTX+=$'\n'"- At a work boundary, tell the user they can run \`/compact\` as-is. The PreCompact hook automatically saves pre-compaction state."
-CTX+=$'\n'"- Only when richer recovery notes are needed, suggest running \`/compact-plus\` before \`/compact\`."
 CTX+=$'\n'"- Address the situation by saving pre-compaction state, not by shrinking scope or moving to another session."
 
 jq -n --arg ctx "$CTX" '{
