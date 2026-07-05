@@ -20,9 +20,13 @@ EPOCH=$(date +%s)
 DEST="$BACKUP_DIR/${EPOCH}-${SESSION_ID}.jsonl"
 cp "$TRANSCRIPT_PATH" "$DEST" 2>/dev/null || exit 0
 
-mapfile -t OLD_BACKUPS < <(find "$BACKUP_DIR" -maxdepth 1 -type f -name "*-${SESSION_ID}.jsonl" -print 2>/dev/null | sort -r | tail -n +21)
-if [[ ${#OLD_BACKUPS[@]} -gt 0 ]]; then
-  rm -f "${OLD_BACKUPS[@]}" 2>/dev/null || true
-fi
+# mapfile is a bash 4+ builtin and stock macOS /bin/bash is 3.2, so use a
+# POSIX while-read loop to prune old backups instead.
+find "$BACKUP_DIR" -maxdepth 1 -type f -name "*-${SESSION_ID}.jsonl" -print 2>/dev/null \
+  | sort -r \
+  | tail -n +21 \
+  | while IFS= read -r old; do
+      rm -f "$old" 2>/dev/null || true
+    done
 
 exit 0

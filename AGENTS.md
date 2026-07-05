@@ -40,3 +40,22 @@ Claude Code context compaction.
 - Hooks must fail open and must not block compaction.
 - Do not write machine-specific absolute paths into git-tracked files.
 - Use `${CLAUDE_PLUGIN_ROOT}`, `${HOME}`, `${TMPDIR:-/tmp}`, and repository-relative paths.
+
+## Version bump policy
+
+Every commit must bump the plugin version, following semver. Commits without a
+version bump are not allowed. Keep the following three slots in sync at the
+same value — the `Check version consistency` step in `.github/workflows/test.yml`
+enforces this and will fail CI on any mismatch:
+
+1. `.claude-plugin/plugin.json` (`version`)
+2. `.claude-plugin/marketplace.json` (`metadata.version`)
+3. `.claude-plugin/marketplace.json` (`plugins[0].version`)
+
+| Change type | Bump | Example |
+|-------------|------|---------|
+| Bug fix, display tweak, refactor, docs | patch (1.0.0 → 1.0.1) | Fix a silent hook failure, small README edit |
+| New feature, new skill, extension of existing behavior | minor (1.0.0 → 1.1.0) | Add a new hook, extend the `/compact-plus` skill |
+| Breaking change, incompatible skill / hook I/O change | major (1.0.0 → 2.0.0) | Incompatible shared-state file format change |
+
+When in doubt, prefer patch.
