@@ -22,6 +22,15 @@ jobs:
       - name: Check bash syntax
         run: bash -n hooks/*.sh
 
+      - name: Check no tracked symlinks
+        run: |
+          # project policy: compact-plus は Windows install 対応のため tracked symlink を禁止する
+          # (Windows の git は既定で symlink をテキストファイルとして checkout し、plugin cache が壊れる)
+          if git ls-files -s | grep '^120000'; then
+            echo "Tracked symlinks are not allowed (broken on Windows git checkout)"
+            exit 1
+          fi
+
       - name: Check version consistency
         run: |
           plugin_version="$(python3 -c 'import json; print(json.load(open(".claude-plugin/plugin.json", encoding="utf-8"))["version"])')"
