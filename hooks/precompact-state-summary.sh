@@ -158,23 +158,21 @@ process_transcript_stream() {
 
 semantic_head_tail() {
   local path="$1"
-  local processed head_part tail_part
-  processed=$(mktemp "${TMPDIR:-/tmp}/compact-plus-transcript.XXXXXX") # lint:allow-os-tmp
-  process_transcript_stream < "$path" > "$processed"
-  head_part=$(head -n "$COMPACT_PLUS_TRANSCRIPT_HEAD_TURNS" "$processed" | cap_bytes "$COMPACT_PLUS_TRANSCRIPT_HEAD_KB" head)
-  tail_part=$(tail -n "$COMPACT_PLUS_TRANSCRIPT_TAIL_TURNS" "$processed" | cap_bytes "$COMPACT_PLUS_TRANSCRIPT_TAIL_KB" tail)
-  rm -f "$processed" 2>/dev/null || true
+  local head_part tail_part
+  # perf: slice the RAW file first, then squash. process_json_line emits exactly one
+  # line per input line, so slicing before is equivalent to slicing after -- but it
+  # drops jq spawns from O(all lines) to O(head+tail). On Windows/Git Bash a full-file
+  # scan is ~5 jq spawns x every line and blows the hook timeout on big transcripts.
+  head_part=$(head -n "$COMPACT_PLUS_TRANSCRIPT_HEAD_TURNS" "$path" | process_transcript_stream | cap_bytes "$COMPACT_PLUS_TRANSCRIPT_HEAD_KB" head)
+  tail_part=$(tail -n "$COMPACT_PLUS_TRANSCRIPT_TAIL_TURNS" "$path" | process_transcript_stream | cap_bytes "$COMPACT_PLUS_TRANSCRIPT_TAIL_KB" tail)
   printf 'Transcript head (%s turns max):\n%s\n\nTranscript tail (%s turns max):\n%s\n' \
     "$COMPACT_PLUS_TRANSCRIPT_HEAD_TURNS" "$head_part" "$COMPACT_PLUS_TRANSCRIPT_TAIL_TURNS" "$tail_part"
 }
 
 semantic_tail() {
   local path="$1"
-  local processed
-  processed=$(mktemp "${TMPDIR:-/tmp}/compact-plus-transcript.XXXXXX") # lint:allow-os-tmp
-  process_transcript_stream < "$path" > "$processed"
-  tail -n "$COMPACT_PLUS_TRANSCRIPT_TAIL_TURNS" "$processed" | cap_bytes "$COMPACT_PLUS_TRANSCRIPT_TAIL_KB" tail
-  rm -f "$processed" 2>/dev/null || true
+  # perf: same reasoning as semantic_head_tail -- slice raw, then squash.
+  tail -n "$COMPACT_PLUS_TRANSCRIPT_TAIL_TURNS" "$path" | process_transcript_stream | cap_bytes "$COMPACT_PLUS_TRANSCRIPT_TAIL_KB" tail
 }
 
 transcript_from_offset() {
@@ -188,7 +186,15 @@ transcript_from_offset() {
   if [[ "$offset" -eq "$size" ]]; then
     printf '(no new transcript events since the previous compact)\n'
   else
-    tail -c +"$((offset + 1))" "$path" | process_transcript_stream | cap_bytes "$COMPACT_PLUS_TRANSCRIPT_TAIL_KB" tail
+    # perf: bound the raw window before squashing. Output is capped to TAIL_KB anyway,
+    # so reading 20x that is far more than enough to fill it after squashing, while
+    # keeping jq spawns bounded when a long stretch happened since the last compact.
+    local raw_cap=$(( COMPACT_PLUS_TRANSCRIPT_TAIL_KB * 1024 * 20 ))
+    if [[ "$raw_cap" -gt 0 ]]; then
+      tail -c +"$((offset + 1))" "$path" | tail -c "$raw_cap" | process_transcript_stream | cap_bytes "$COMPACT_PLUS_TRANSCRIPT_TAIL_KB" tail
+    else
+      tail -c +"$((offset + 1))" "$path" | process_transcript_stream | cap_bytes "$COMPACT_PLUS_TRANSCRIPT_TAIL_KB" tail
+    fi
   fi
 }
 
