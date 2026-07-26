@@ -19,7 +19,7 @@ Claude Code と Codex の `/compact` 前後で作業状態を保存・復旧す�
 
 - 手動 `/compact` でも auto-compact でも同じ経路で hook が発火する
 - 圧縮前: transcript backup と 10 見出し state file 生成が PreCompact hook で自動実行される
-- 圧縮後: Claude Codeは次のUserPromptSubmit、Codexは次turnの`SessionStart(source=compact)`でrecovery guidanceを自動注入する
+- 圧縮後: Claude CodeとCodexは最初のpost-compaction prompt前に`SessionStart(source=compact)`でstateを一度だけ自動注入する
 - agent が特定 skill を呼ぶ必要も、事前に何かを実行する必要もない
 
 任意で強化する場合:
@@ -166,11 +166,10 @@ Claude CodeとCodexは別設定を使う。
 2. **PostCompact hook**
    - `compaction-recovery.sh` が recovery marker を書き、warn cooldown をリセットする
 3. **復旧hook**
-   - `userpromptsubmit-compaction-recovery.sh` が marker を検知して state file と plan file への参照、および「memory / rule / skill 言及は圧縮 summary の要約であり原文が authoritative」という factual note を additionalContext に注入する
-   - state file に `## Skills Invoked` があれば、skill 一覧の参照案内も追加する
+   - `sessionstart-compaction-recovery.sh` がClaude CodeとCodexの`SessionStart(source=compact)`を処理する
+   - recovery markerを一度だけconsumeし、保存済みstate本文、存在する場合のactive plan参照、original-source reminderを`additionalContext`へ注入する
    - `userpromptsubmit-compact-plus-reminder.sh` が warn marker 検知時に軽い notification と state 3 行 recitation を additionalContext に注入する
-   - Codexは`SessionStart(source=compact)`で`sessionstart-compaction-recovery.sh`を呼ぶ。compact直後の継続はbuilt-in summaryが担い、compact-plusの外部stateは次turnで追加される
-   - Codexがこのstart hookを配送するのはroot threadだけである。親がspawnしたsubagentには圧縮後のstart hookが来ないため、復旧は次の`UserPromptSubmit`で届く (親からの送信はsubagentにはuser inputとして入る)。markerは1度で消費されるので、`SessionStart`で復旧済みのroot threadは次のpromptでは何もしない
+   - `userpromptsubmit-compaction-recovery.sh` は fallback channel として登録を維持する。Codexがstart hookを配送するのはroot threadだけであり、親がspawnしたsubagentには圧縮後のstart hookが来ないため、復旧は次の`UserPromptSubmit`で届く (親からの送信はsubagentにはuser inputとして入る)。markerは1度で消費されるので、`SessionStart`で復旧済みのthreadは次のpromptでは何もしない
 4. **手動 fallback (`/compact-plus` skill)**
    - agent 自身が SKILL.md の 10 見出し手順に従って state file を書く
 
@@ -196,7 +195,7 @@ Claude CodeとCodexは別設定を使う。
 | `${TMPDIR}/claude-compact-state/<session_id>.md` | `precompact-state-summary.sh` / `/compact-plus` skill | recovery hook / agent | 圧縮前 state |
 | `${TMPDIR}/claude-compact-state-offset/<session_id>` | `precompact-state-summary.sh` | `precompact-state-summary.sh` | incremental 用 byte offset |
 | `${TMPDIR}/claude-compact-state-counter/<session_id>` | `precompact-state-summary.sh` | `precompact-state-summary.sh` | refresh cycle counter |
-| `${TMPDIR}/claude-compacted/<session_id>` | `compaction-recovery.sh` | `userpromptsubmit-compaction-recovery.sh` | PostCompact marker |
+| `${TMPDIR}/claude-compacted/<session_id>` | `compaction-recovery.sh` | `sessionstart-compaction-recovery.sh` | one-shot PostCompact marker |
 | `${TMPDIR}/claude-compact-warn/<session_id>` | base repo `statusline.sh` | `userpromptsubmit-compact-plus-reminder.sh` | 閾値超過通知 |
 | `${TMPDIR}/claude-compact-warned/<session_id>` | `userpromptsubmit-compact-plus-reminder.sh` | statusline / recovery hook | 通知 cooldown |
 | `${TMPDIR}/claude-active-plan/<session_id>` | plan-management hook | recovery hook | active plan path |

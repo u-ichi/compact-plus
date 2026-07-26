@@ -31,7 +31,7 @@ compact-plus に関係する Claude Code hook event:
 |---|---|
 | `PreCompact` | compaction 前に transcript backup と state file 生成を行う |
 | `PostCompact` | compaction 後に recovery marker を書き、warn cooldown を reset する |
-| `UserPromptSubmit` | 次の user prompt で `additionalContext` に recovery guidance を注入する |
+| `SessionStart`, matcher `compact` | 最初のpost-compaction prompt前に保存済みstateを`additionalContext`へ注入する |
 
 Claude Code plugin hook は `hooks/hooks.json` で設定する。`PreCompact` / `PostCompact` では `manual` と `auto` の matcher 値が公式 docs に記載されている。Claude Code docs では、これらの compact event に対して command / HTTP / MCP tool hook が示されており、compact-plus は command hook を使う。
 
@@ -66,7 +66,7 @@ manual compactとauto compactionは同じCodex hook sequenceを通る。
 1. `PreCompact`が現在のthread idに対応するversioned transcript backupと構造化state fileを作る。
 2. `PostCompact`がone-shot recovery markerを書き、そのthreadの通知cooldownを削除する。
 3. compact直後の継続はCodex標準のcompact summaryが担う。
-4. 次turnの`SessionStart(source=compact)`がmarkerをconsumeし、外部state path、任意のplan path、原文再読 reminder、skill recovery guidanceを`additionalContext`へ追加する。
+4. 最初のpost-compaction prompt前に`SessionStart(source=compact)`がmarkerをconsumeし、保存済みstate本文、任意のplan path、原文再読reminderを`additionalContext`へ追加する。
 
 上の「現在のthread id」は、hook入力に`agent_id`があればその値、無ければ`session_id`である。Codexの`session_id`はroot threadと全子孫で共有するidで、親がspawnしたsubagentにはさらに`agent_id`が付く。`session_id`だけでキーを作ると、subagentのstateが親の名前で保存され、親のstate fileを上書きしてしまう。
 
@@ -138,11 +138,10 @@ compact-plusはどちらのcompaction promptにも手を入れず、構造化sta
 6. state fileをruntime別state directoryへ書く。
 7. `PostCompact` が開始する。
 8. `compaction-recovery.sh`がruntime別markerを書き、warn cooldown markerを削除する。
-9. Claudeは次の`UserPromptSubmit`、Codexのroot threadは次turnの`SessionStart(source=compact)`、Codexのthread-spawn subagentは次の`UserPromptSubmit` (圧縮後にstart hookが来ないため) でmarkerをconsumeし、以下を注入する。
-   - state file path
+9. Claude CodeとCodexは最初のpost-compaction prompt前の`SessionStart(source=compact)`で復旧する。Codexのthread-spawn subagentは圧縮後にstart hookが来ないため、次の`UserPromptSubmit`で復旧する。recovery hookは以下を注入する。
+   - 保存済みstate file本文
    - active plan path があればその path
    - original-source factual note
-   - Skills Invoked があれば skill 再読 guidance
 10. Claudeはstatusline warning markerをconsumeする。Codexは現在threadの最新token-count eventから使用率を算出し、`COMPACT_PLUS_CODEX_WARN_THRESHOLD`（default `75`）で通知する。
 
 ## 6. State file format
@@ -169,7 +168,7 @@ heading order を固定することで、compaction 後の hook と agent が同
 | `${TMPDIR:-/tmp}/claude-compact-state/<session_id>.md` | `precompact-state-summary.sh` または `/compact-plus` skill | recovery hook と agent | State payload。state generation ごとに上書き |
 | `${TMPDIR:-/tmp}/claude-compact-state-offset/<session_id>` | `precompact-state-summary.sh` | `precompact-state-summary.sh` | Incremental transcript offset。state generation 内部用 |
 | `${TMPDIR:-/tmp}/claude-compact-state-counter/<session_id>` | `precompact-state-summary.sh` | `precompact-state-summary.sh` | Refresh cadence counter。state generation 内部用 |
-| `${TMPDIR:-/tmp}/claude-compacted/<session_id>` | `compaction-recovery.sh` | `userpromptsubmit-compaction-recovery.sh` | One-shot recovery trigger。次 user prompt で consume |
+| `${TMPDIR:-/tmp}/claude-compacted/<session_id>` | `compaction-recovery.sh` | `sessionstart-compaction-recovery.sh` | `SessionStart(source=compact)`がconsumeするone-shot recovery trigger |
 | `${TMPDIR:-/tmp}/claude-compact-warn/<session_id>` | base repository statusline hook | `userpromptsubmit-compact-plus-reminder.sh` | Threshold warning。compact-plus は producer を所有しない |
 | `${TMPDIR:-/tmp}/claude-compact-warned/<session_id>` | `userpromptsubmit-compact-plus-reminder.sh` | statusline side と recovery hook | Notification cooldown |
 | `${TMPDIR:-/tmp}/claude-active-plan/<session_id>` | plan-management hook | recovery hook | Active plan pointer。compact-plus は producer を所有しない |

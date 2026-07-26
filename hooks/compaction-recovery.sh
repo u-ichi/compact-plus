@@ -1,9 +1,9 @@
 #!/bin/bash
 # PostCompact hook (matcher: ""): record compaction with a marker file.
-# PostCompact does not support additionalContext output, so context injection is
-# handled by UserPromptSubmit on Claude Code, and on Codex by
-# SessionStart(source=compact) for root threads plus UserPromptSubmit for
-# thread-spawn subagents, which get no start hook after compaction.
+# PostCompact does not support additionalContext output, so the marker is
+# consumed by SessionStart(source=compact), which injects the saved state. Codex
+# thread-spawn subagents get no start hook after compaction, so UserPromptSubmit
+# stays as their delivery channel.
 #
 # fail-open (always exit 0)
 

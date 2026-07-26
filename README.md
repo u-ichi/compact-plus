@@ -19,7 +19,7 @@ After installation, just run `/compact` as usual. **No additional action is requ
 
 - Both manual `/compact` and auto-compaction trigger the same hook path
 - Before compaction: the PreCompact hook automatically backs up the transcript and generates the 10-section state file
-- After compaction: Claude Code recovers through the next `UserPromptSubmit`; Codex recovers through `SessionStart(source=compact)` on the next turn
+- After compaction: Claude Code and Codex recover exactly once through `SessionStart(source=compact)` before the first post-compaction prompt
 - The agent does not need to call any specific skill or perform any preparation
 
 Optional enhancements:
@@ -136,8 +136,10 @@ Example disabling the fallback:
 | `COMPACT_PLUS_TRANSCRIPT_TAIL_TURNS` | `25` | Number of turns to keep from the tail side |
 | `COMPACT_PLUS_TRANSCRIPT_HEAD_KB` | `10` | Head-side byte cap in KB |
 | `COMPACT_PLUS_TRANSCRIPT_TAIL_KB` | `40` | Tail-side byte cap in KB |
+| `COMPACT_PLUS_RAW_DELTA_FACTOR` | `20` | Incremental mode reads at most `TAIL_KB * N` of raw transcript delta before squashing. Set `0` for unbounded |
 | `COMPACT_PLUS_INCREMENTAL_REFRESH` | `10` | Full rebuild every N runs. Set `0` to disable |
 | `COMPACT_PLUS_MAX_OUTPUT_TOKENS` | `4096` | LLM output cap for backends that read it |
+| `COMPACT_PLUS_BACKEND_TIMEOUT` | `80` | Per-backend timeout in seconds. Primary and fallback run serially inside the 180s hook budget. Set `0` to disable |
 | `COMPACT_PLUS_SQUASH_ENABLED` | `1` | Enables or disables tool result squash |
 | `COMPACT_PLUS_SQUASH_READ_LINES` | `100` | Replaces Read tool output above N lines with `[Read: N lines from path]` |
 | `COMPACT_PLUS_SQUASH_BASH_CHARS` | `500` | Replaces Bash output above N characters with `[Bash: exit code, N chars output]` |
@@ -166,10 +168,9 @@ When you pass natural-language instructions, such as `/compact keep the importan
 2. **PostCompact hook**
    - `compaction-recovery.sh` writes a recovery marker and resets the warning cooldown
 3. **Recovery hook**
-   - `userpromptsubmit-compaction-recovery.sh` consumes the recovery marker and injects state file and plan file references, plus a factual note that memory, rule, and skill mentions in the compact summary are summaries and that the original files remain authoritative
-   - Codex calls `sessionstart-compaction-recovery.sh` for `SessionStart(source=compact)`; built-in summary continuity remains responsible for the immediate compact continuation, and compact-plus external state is added on the next turn
-   - Codex dispatches that start hook to root threads only. A thread-spawn subagent receives no start hook after compaction, so its recovery arrives through the next `UserPromptSubmit` instead; parent messages reach a subagent as user input. The marker is consumed once, so a root thread that already recovered at `SessionStart` is a no-op on the following prompt
-   - If the state file has `## Skills Invoked`, the hook also injects guidance for rereading the relevant skills
+   - `sessionstart-compaction-recovery.sh` handles `SessionStart(source=compact)` for both Claude Code and Codex
+   - It consumes the recovery marker exactly once and injects the saved state content, active plan reference when present, and original-source reminder through `additionalContext`
+   - `userpromptsubmit-compaction-recovery.sh` stays registered as the fallback channel. Codex dispatches the start hook to root threads only, so a thread-spawn subagent receives no start hook after compaction and recovers through the next `UserPromptSubmit`; parent messages reach a subagent as user input. The marker is consumed once, so a thread that already recovered at `SessionStart` is a no-op on the following prompt
    - `userpromptsubmit-compact-plus-reminder.sh` consumes warn markers and injects a lightweight notification plus a three-line state recitation when available
 4. **SessionStart hook**
    - `sessionstart-export-session-id.sh` writes `export CLAUDE_CODE_SESSION_ID=<id>` to `$CLAUDE_ENV_FILE` so the `/compact-plus` skill can obtain the session id through the bundled `scripts/get-session-id.sh` wrapper without depending on any file outside the plugin
@@ -198,7 +199,7 @@ State files start with `# Compact Prep State` and use the same 10-section order 
 | `${TMPDIR}/claude-compact-state/<session_id>.md` | `precompact-state-summary.sh` / `/compact-plus` skill | recovery hook / agent | Pre-compaction state |
 | `${TMPDIR}/claude-compact-state-offset/<session_id>` | `precompact-state-summary.sh` | `precompact-state-summary.sh` | Incremental byte offset |
 | `${TMPDIR}/claude-compact-state-counter/<session_id>` | `precompact-state-summary.sh` | `precompact-state-summary.sh` | Refresh cycle counter |
-| `${TMPDIR}/claude-compacted/<session_id>` | `compaction-recovery.sh` | `userpromptsubmit-compaction-recovery.sh` | PostCompact marker |
+| `${TMPDIR}/claude-compacted/<session_id>` | `compaction-recovery.sh` | `sessionstart-compaction-recovery.sh` | One-shot PostCompact marker |
 | `${TMPDIR}/claude-compact-warn/<session_id>` | base repo `statusline.sh` | `userpromptsubmit-compact-plus-reminder.sh` | Threshold warning |
 | `${TMPDIR}/claude-compact-warned/<session_id>` | `userpromptsubmit-compact-plus-reminder.sh` | statusline / recovery hook | Notification cooldown |
 | `${TMPDIR}/claude-active-plan/<session_id>` | plan-management hook | recovery hook | Active plan path |
