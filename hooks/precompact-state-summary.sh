@@ -26,6 +26,8 @@ COMPACT_PLUS_SQUASH_ENABLED="${COMPACT_PLUS_SQUASH_ENABLED:-1}"
 COMPACT_PLUS_SQUASH_READ_LINES="${COMPACT_PLUS_SQUASH_READ_LINES:-100}"
 COMPACT_PLUS_SQUASH_BASH_CHARS="${COMPACT_PLUS_SQUASH_BASH_CHARS:-500}"
 COMPACT_PLUS_TWO_PASS="${COMPACT_PLUS_TWO_PASS:-1}"
+COMPACT_PLUS_RAW_DELTA_FACTOR="${COMPACT_PLUS_RAW_DELTA_FACTOR:-20}"
+COMPACT_PLUS_BACKEND_TIMEOUT="${COMPACT_PLUS_BACKEND_TIMEOUT:-180}"
 
 DEFAULT_PRIMARY_BACKEND='claude -p --model claude-sonnet-5 --effort medium --permission-mode dontAsk --output-format text --no-session-persistence --system-prompt "$SYSTEM_PROMPT"'
 PRIMARY_CMD="${COMPACT_PLUS_PRIMARY_BACKEND-$DEFAULT_PRIMARY_BACKEND}"
@@ -168,25 +170,23 @@ process_transcript_stream() {
   done
 }
 
+# Squashing is per line and order preserving, so selecting the head/tail lines
+# before squashing yields the same result as squashing the whole transcript
+# first. Selecting first keeps the work proportional to the requested turns
+# instead of the transcript size, which matters because process_json_line
+# forks several jq processes per line.
 semantic_head_tail() {
   local path="$1"
-  local processed head_part tail_part
-  processed=$(mktemp "${TMPDIR:-/tmp}/compact-plus-transcript.XXXXXX") # lint:allow-os-tmp
-  process_transcript_stream < "$path" > "$processed"
-  head_part=$(head -n "$COMPACT_PLUS_TRANSCRIPT_HEAD_TURNS" "$processed" | cap_bytes "$COMPACT_PLUS_TRANSCRIPT_HEAD_KB" head)
-  tail_part=$(tail -n "$COMPACT_PLUS_TRANSCRIPT_TAIL_TURNS" "$processed" | cap_bytes "$COMPACT_PLUS_TRANSCRIPT_TAIL_KB" tail)
-  rm -f "$processed" 2>/dev/null || true
+  local head_part tail_part
+  head_part=$(head -n "$COMPACT_PLUS_TRANSCRIPT_HEAD_TURNS" "$path" | process_transcript_stream | cap_bytes "$COMPACT_PLUS_TRANSCRIPT_HEAD_KB" head)
+  tail_part=$(tail -n "$COMPACT_PLUS_TRANSCRIPT_TAIL_TURNS" "$path" | process_transcript_stream | cap_bytes "$COMPACT_PLUS_TRANSCRIPT_TAIL_KB" tail)
   printf 'Transcript head (%s turns max):\n%s\n\nTranscript tail (%s turns max):\n%s\n' \
     "$COMPACT_PLUS_TRANSCRIPT_HEAD_TURNS" "$head_part" "$COMPACT_PLUS_TRANSCRIPT_TAIL_TURNS" "$tail_part"
 }
 
 semantic_tail() {
   local path="$1"
-  local processed
-  processed=$(mktemp "${TMPDIR:-/tmp}/compact-plus-transcript.XXXXXX") # lint:allow-os-tmp
-  process_transcript_stream < "$path" > "$processed"
-  tail -n "$COMPACT_PLUS_TRANSCRIPT_TAIL_TURNS" "$processed" | cap_bytes "$COMPACT_PLUS_TRANSCRIPT_TAIL_KB" tail
-  rm -f "$processed" 2>/dev/null || true
+  tail -n "$COMPACT_PLUS_TRANSCRIPT_TAIL_TURNS" "$path" | process_transcript_stream | cap_bytes "$COMPACT_PLUS_TRANSCRIPT_TAIL_KB" tail
 }
 
 transcript_from_offset() {
@@ -200,7 +200,13 @@ transcript_from_offset() {
   if [[ "$offset" -eq "$size" ]]; then
     printf '(no new transcript events since the previous compact)\n'
   else
-    tail -c +"$((offset + 1))" "$path" | process_transcript_stream | cap_bytes "$COMPACT_PLUS_TRANSCRIPT_TAIL_KB" tail
+    # Squashing never grows a line, so pre-trimming the raw delta to a generous
+    # multiple of the output budget cannot drop anything that would have
+    # survived cap_bytes, and it bounds the work when the delta is huge.
+    tail -c +"$((offset + 1))" "$path" \
+      | cap_bytes "$((COMPACT_PLUS_TRANSCRIPT_TAIL_KB * COMPACT_PLUS_RAW_DELTA_FACTOR))" tail \
+      | process_transcript_stream \
+      | cap_bytes "$COMPACT_PLUS_TRANSCRIPT_TAIL_KB" tail
   fi
 }
 
@@ -311,6 +317,21 @@ build_user_prompt() {
   printf 'Priority: honor user custom_instructions if provided.\n'
 }
 
+# A hung backend blocks compaction itself, so cap it. `timeout` is GNU
+# coreutils and is often absent on macOS; fall back to running unguarded
+# rather than failing the summary.
+run_with_timeout() {
+  if [[ "$COMPACT_PLUS_BACKEND_TIMEOUT" -le 0 ]] 2>/dev/null; then
+    "$@"
+  elif command -v timeout >/dev/null 2>&1; then
+    timeout "$COMPACT_PLUS_BACKEND_TIMEOUT" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$COMPACT_PLUS_BACKEND_TIMEOUT" "$@"
+  else
+    "$@"
+  fi
+}
+
 run_backend_if_set() {
   local cmd="$1"
   local user_prompt="$2"
@@ -318,7 +339,12 @@ run_backend_if_set() {
 
   [[ -n "$cmd" ]] || return 1
 
-  if output=$(SYSTEM_PROMPT="$SYSTEM_PROMPT" SESSION_ID="$SESSION_ID" TRANSCRIPT_PATH="$TRANSCRIPT_PATH" MAX_OUTPUT_TOKENS="$COMPACT_PLUS_MAX_OUTPUT_TOKENS" bash -c "$cmd" <<< "$user_prompt" 2>/dev/null); then
+  if output=$(run_with_timeout env \
+    SYSTEM_PROMPT="$SYSTEM_PROMPT" \
+    SESSION_ID="$SESSION_ID" \
+    TRANSCRIPT_PATH="$TRANSCRIPT_PATH" \
+    MAX_OUTPUT_TOKENS="$COMPACT_PLUS_MAX_OUTPUT_TOKENS" \
+    bash -c "$cmd" <<< "$user_prompt" 2>/dev/null); then
     if [[ "$(printf '%s\n' "$output" | head -n 1)" == "# Compact Prep State" ]]; then
       printf '%s\n' "$output"
       return 0
