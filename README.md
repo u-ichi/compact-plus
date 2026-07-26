@@ -19,7 +19,7 @@ After installation, just run `/compact` as usual. **No additional action is requ
 
 - Both manual `/compact` and auto-compaction trigger the same hook path
 - Before compaction: the PreCompact hook automatically backs up the transcript and generates the 10-section state file
-- After compaction: Claude Code recovers through the next `UserPromptSubmit`; Codex recovers through `SessionStart(source=compact)` on the next turn
+- After compaction: Claude Code and Codex recover exactly once through `SessionStart(source=compact)` before the first post-compaction prompt
 - The agent does not need to call any specific skill or perform any preparation
 
 Optional enhancements:
@@ -166,9 +166,8 @@ When you pass natural-language instructions, such as `/compact keep the importan
 2. **PostCompact hook**
    - `compaction-recovery.sh` writes a recovery marker and resets the warning cooldown
 3. **Recovery hook**
-   - `userpromptsubmit-compaction-recovery.sh` consumes the recovery marker and injects state file and plan file references, plus a factual note that memory, rule, and skill mentions in the compact summary are summaries and that the original files remain authoritative
-   - Codex calls `sessionstart-compaction-recovery.sh` for `SessionStart(source=compact)`; built-in summary continuity remains responsible for the immediate compact continuation, and compact-plus external state is added on the next turn
-   - If the state file has `## Skills Invoked`, the hook also injects guidance for rereading the relevant skills
+   - `sessionstart-compaction-recovery.sh` handles `SessionStart(source=compact)` for both Claude Code and Codex
+   - It consumes the recovery marker exactly once and injects the saved state content, active plan reference when present, and original-source reminder through `additionalContext`
    - `userpromptsubmit-compact-plus-reminder.sh` consumes warn markers and injects a lightweight notification plus a three-line state recitation when available
 4. **SessionStart hook**
    - `sessionstart-export-session-id.sh` writes `export CLAUDE_CODE_SESSION_ID=<id>` to `$CLAUDE_ENV_FILE` so the `/compact-plus` skill can obtain the session id through the bundled `scripts/get-session-id.sh` wrapper without depending on any file outside the plugin
@@ -197,7 +196,7 @@ State files start with `# Compact Prep State` and use the same 10-section order 
 | `${TMPDIR}/claude-compact-state/<session_id>.md` | `precompact-state-summary.sh` / `/compact-plus` skill | recovery hook / agent | Pre-compaction state |
 | `${TMPDIR}/claude-compact-state-offset/<session_id>` | `precompact-state-summary.sh` | `precompact-state-summary.sh` | Incremental byte offset |
 | `${TMPDIR}/claude-compact-state-counter/<session_id>` | `precompact-state-summary.sh` | `precompact-state-summary.sh` | Refresh cycle counter |
-| `${TMPDIR}/claude-compacted/<session_id>` | `compaction-recovery.sh` | `userpromptsubmit-compaction-recovery.sh` | PostCompact marker |
+| `${TMPDIR}/claude-compacted/<session_id>` | `compaction-recovery.sh` | `sessionstart-compaction-recovery.sh` | One-shot PostCompact marker |
 | `${TMPDIR}/claude-compact-warn/<session_id>` | base repo `statusline.sh` | `userpromptsubmit-compact-plus-reminder.sh` | Threshold warning |
 | `${TMPDIR}/claude-compact-warned/<session_id>` | `userpromptsubmit-compact-plus-reminder.sh` | statusline / recovery hook | Notification cooldown |
 | `${TMPDIR}/claude-active-plan/<session_id>` | plan-management hook | recovery hook | Active plan path |

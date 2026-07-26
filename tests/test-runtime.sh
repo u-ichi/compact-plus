@@ -3,6 +3,7 @@
 set -uo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+export CLAUDE_PLUGIN_ROOT="$ROOT"
 TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/compact-plus-test.XXXXXX")
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
@@ -120,8 +121,14 @@ test_codex_manifest() {
   fi
   jq -e '.version == "1.1.0"' "$ROOT/.claude-plugin/plugin.json" >/dev/null 2>&1 \
     || fail "Claude plugin version is 1.1.0"
-  jq -e '.hooks.SessionStart[] | select(.matcher == "compact")' "$ROOT/hooks/hooks.json" >/dev/null 2>&1 \
-    || fail "SessionStart compact recovery hook is registered"
+  jq -e '[.hooks.SessionStart[] | select(.matcher == "compact") | .hooks[] |
+    select(.command | contains("sessionstart-compaction-recovery.sh"))] | length == 1' \
+    "$ROOT/hooks/hooks.json" >/dev/null 2>&1 \
+    || fail "SessionStart compact recovery hook is registered exactly once"
+  jq -e '[.hooks.UserPromptSubmit[].hooks[].command |
+    select(contains("userpromptsubmit-compaction-recovery.sh"))] | length == 0' \
+    "$ROOT/hooks/hooks.json" >/dev/null 2>&1 \
+    || fail "UserPromptSubmit compaction recovery registration is removed"
 }
 
 test_session_id_priority() {
@@ -270,7 +277,7 @@ test_state_generation_fails_open() {
   assert_not_file "$TMPDIR/codex-compact-state/backend-failure.md" "Backend failure fails open without partial state"
 }
 
-test_claude_recovery_regression() {
+test_claude_recovery_is_sessionstart_one_shot() {
   local input output
   mkdir -p "$TMPDIR/claude-compact-state"
   printf '# Compact Prep State\n## Recovery Notes\nClaude recovery\n' \
@@ -278,13 +285,16 @@ test_claude_recovery_regression() {
 
   input='{"session_id":"claude-recovery","hook_event_name":"PostCompact","trigger":"manual"}'
   COMPACT_PLUS_RUNTIME=claude "$ROOT/hooks/compaction-recovery.sh" <<< "$input"
-  assert_file "$TMPDIR/claude-compacted/claude-recovery" "Claude PostCompact marker remains unchanged"
+  assert_file "$TMPDIR/claude-compacted/claude-recovery" "Claude PostCompact writes a recovery marker"
 
-  input='{"session_id":"claude-recovery","hook_event_name":"UserPromptSubmit"}'
-  output=$(COMPACT_PLUS_RUNTIME=claude "$ROOT/hooks/userpromptsubmit-compaction-recovery.sh" <<< "$input")
-  assert_contains "$output" '"hookEventName": "UserPromptSubmit"' "Claude recovery still uses UserPromptSubmit"
-  assert_contains "$output" "$TMPDIR/claude-compact-state/claude-recovery.md" "Claude recovery references the Claude state file"
-  assert_not_file "$TMPDIR/claude-compacted/claude-recovery" "Claude recovery remains one-shot"
+  input='{"session_id":"claude-recovery","hook_event_name":"SessionStart","source":"compact"}'
+  output=$(COMPACT_PLUS_RUNTIME=claude "$ROOT/hooks/sessionstart-compaction-recovery.sh" <<< "$input")
+  assert_contains "$output" '"hookEventName": "SessionStart"' "Claude recovery uses SessionStart additionalContext"
+  assert_contains "$output" "Claude recovery" "Claude recovery injects the saved state content"
+  assert_not_file "$TMPDIR/claude-compacted/claude-recovery" "Claude recovery consumes the marker"
+
+  output=$(COMPACT_PLUS_RUNTIME=claude "$ROOT/hooks/sessionstart-compaction-recovery.sh" <<< "$input")
+  assert_empty "$output" "Claude recovery is one-shot"
 }
 
 test_codex_recovery_is_one_shot() {
@@ -301,7 +311,7 @@ test_codex_recovery_is_one_shot() {
   input='{"session_id":"codex-recovery","hook_event_name":"SessionStart","source":"compact"}'
   output=$(COMPACT_PLUS_RUNTIME=codex "$ROOT/hooks/sessionstart-compaction-recovery.sh" <<< "$input")
   assert_contains "$output" '"hookEventName": "SessionStart"' "Codex recovery uses SessionStart additionalContext"
-  assert_contains "$output" "$TMPDIR/codex-compact-state/codex-recovery.md" "Codex recovery references its state file"
+  assert_contains "$output" "Synthetic recovery" "Codex recovery injects the saved state content"
   assert_not_file "$TMPDIR/codex-compacted/codex-recovery" "Codex recovery consumes the marker"
 
   output=$(COMPACT_PLUS_RUNTIME=codex "$ROOT/hooks/sessionstart-compaction-recovery.sh" <<< "$input")
@@ -315,7 +325,7 @@ test_claude_warning_threshold_is_independent
 test_codex_warning_threshold
 test_runtime_path_separation
 test_state_generation_fails_open
-test_claude_recovery_regression
+test_claude_recovery_is_sessionstart_one_shot
 test_codex_recovery_is_one_shot
 
 if [[ "$FAILURES" -ne 0 ]]; then

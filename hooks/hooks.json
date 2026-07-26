@@ -6,16 +6,6 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/userpromptsubmit-compaction-recovery.sh\"",
-            "timeout": 5000
-          }
-        ]
-      },
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/userpromptsubmit-compact-plus-reminder.sh\"",
             "timeout": 3000
           }

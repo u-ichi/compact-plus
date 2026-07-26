@@ -31,7 +31,7 @@ Claude Code hook events relevant to compact-plus:
 |---|---|
 | `PreCompact` | Back up the transcript and generate the state file before compaction |
 | `PostCompact` | Write a recovery marker and reset the warning cooldown after compaction |
-| `UserPromptSubmit` | Inject recovery guidance through `additionalContext` on the next user prompt |
+| `SessionStart`, matcher `compact` | Inject saved state through `additionalContext` before the first post-compaction prompt |
 
 Claude Code plugin hooks are configured through `hooks/hooks.json`. For `PreCompact` and `PostCompact`, Claude Code documents `manual` and `auto` matcher values. Claude Code also documents command, HTTP, and MCP tool hooks for those compact events. compact-plus uses command hooks.
 
@@ -64,7 +64,7 @@ Manual and automatic compaction follow the same Codex hook sequence:
 1. `PreCompact` creates a versioned transcript backup and the structured state file for the current thread id.
 2. `PostCompact` writes a one-shot recovery marker and clears the thread's warning cooldown.
 3. Codex's built-in compact summary continues the thread immediately.
-4. On the next turn, `SessionStart(source=compact)` consumes the marker and adds the external state path, optional plan path, original-source reminder, and skill-recovery guidance through `additionalContext`.
+4. Before the first post-compaction prompt, `SessionStart(source=compact)` consumes the marker and adds the saved state content, optional plan path, and original-source reminder through `additionalContext`.
 
 The Codex notification does not depend on Claude Code's statusline marker. On each eligible prompt, compact-plus reads the latest usable `token_count` event from the final 500 transcript records after verifying that the rollout's `session_meta.id` equals the hook input's `session_id`. A missing transcript, an unreadable or mismatched `session_meta`, or no usable `token_count` event in those records produces no notification. A newer unusable event does not discard an earlier usable event in the same range.
 
@@ -124,11 +124,10 @@ compact-plus does not touch either compaction prompt. It places structured state
 6. The state file is written to the runtime-specific state directory.
 7. `PostCompact` starts.
 8. `compaction-recovery.sh` writes the runtime-specific marker and removes its warning cooldown marker.
-9. Claude recovers on the next `UserPromptSubmit`; Codex recovers through `SessionStart(source=compact)` on the next turn. The recovery hook injects:
-   - state file path,
+9. Claude Code and Codex recover through `SessionStart(source=compact)` before the first post-compaction prompt. The recovery hook injects:
+   - saved state file content,
    - active plan path when present,
-   - original-source factual note,
-   - Skills Invoked guidance when present.
+   - original-source factual note.
 10. Claude consumes the statusline marker. Codex calculates usage from the latest current-thread token-count event and warns at `COMPACT_PLUS_CODEX_WARN_THRESHOLD` (default `75`).
 
 ## 6. State File Format
@@ -155,7 +154,7 @@ The stable heading order lets hooks and agents skim the file predictably after c
 | `${TMPDIR:-/tmp}/claude-compact-state/<session_id>.md` | `precompact-state-summary.sh` or `/compact-plus` skill | recovery hook and agent | State payload. Rewritten by each state-generation run |
 | `${TMPDIR:-/tmp}/claude-compact-state-offset/<session_id>` | `precompact-state-summary.sh` | `precompact-state-summary.sh` | Incremental transcript offset. Internal to state generation |
 | `${TMPDIR:-/tmp}/claude-compact-state-counter/<session_id>` | `precompact-state-summary.sh` | `precompact-state-summary.sh` | Refresh cadence counter. Internal to state generation |
-| `${TMPDIR:-/tmp}/claude-compacted/<session_id>` | `compaction-recovery.sh` | `userpromptsubmit-compaction-recovery.sh` | One-shot recovery trigger. Consumed on the next user prompt |
+| `${TMPDIR:-/tmp}/claude-compacted/<session_id>` | `compaction-recovery.sh` | `sessionstart-compaction-recovery.sh` | One-shot recovery trigger consumed by `SessionStart(source=compact)` |
 | `${TMPDIR:-/tmp}/claude-compact-warn/<session_id>` | Base repository statusline hook | `userpromptsubmit-compact-plus-reminder.sh` | Threshold warning. compact-plus reads but does not own the producer |
 | `${TMPDIR:-/tmp}/claude-compact-warned/<session_id>` | `userpromptsubmit-compact-plus-reminder.sh` | statusline side and recovery hook | Notification cooldown |
 | `${TMPDIR:-/tmp}/claude-active-plan/<session_id>` | plan-management hook | recovery hook | Active plan pointer. compact-plus reads but does not own the producer |

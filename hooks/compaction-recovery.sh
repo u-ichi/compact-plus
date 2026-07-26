@@ -1,7 +1,6 @@
 #!/bin/bash
 # PostCompact hook (matcher: ""): record compaction with a marker file.
-# PostCompact does not support additionalContext output, so context injection
-# is handled by UserPromptSubmit on Claude Code and SessionStart on Codex.
+# SessionStart(source=compact) consumes the marker and injects saved state.
 #
 # fail-open (always exit 0)
 
