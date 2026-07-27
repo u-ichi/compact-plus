@@ -141,6 +141,10 @@ compact-plus does not touch either compaction prompt. It places structured state
 
 Because the injected mark is written only by a `SessionStart` that actually produced output, a runtime that never dispatches that hook never grows a mark, and its `PostCompact` keeps arming the marker for the `UserPromptSubmit` fallback.
 
+The mark is trusted only while it is newer than the state file it covers. A `PostCompact` that never finishes, because the hook timed out or the process was killed, leaves its mark behind. Treating that leftover as authoritative would make the next compaction disappear from every channel at once: `SessionStart` would skip on the mark, `PostCompact` would consume the mark instead of arming a marker, and the fallback would have nothing to deliver. Comparing timestamps confines a leaked mark to the compaction it leaked from, since the next `PreCompact` writes a state file newer than it. Equal timestamps count as delivered, because the mark is always written after the state file and a tie therefore means the same compaction.
+
+The injected payload also reports when the state file was written. When `PreCompact`'s backend fails, the previous state file stays on disk and is injected again, so the timestamp is what tells the reader that the state predates the work just compacted.
+
 ## 6. State File Format
 
 Generated state files and manually created `/compact-plus` state files share the same heading order:

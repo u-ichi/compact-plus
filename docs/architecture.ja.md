@@ -151,6 +151,10 @@ compact-plusはどちらのcompaction promptにも手を入れず、構造化sta
 
 注入済み印は実際に出力を出した`SessionStart`だけが書くので、このhookを配送しないruntimeでは印が生まれず、`PostCompact`は`UserPromptSubmit` fallback用のmarkerを書き続ける。
 
+印は「対象のstate fileより新しい間」だけ有効として扱う。hook timeoutやprocess killで`PostCompact`が完走しないと印が残る。これを無条件に信頼すると次のcompactionが全経路で消える。`SessionStart`は印を見て黙り、`PostCompact`はmarkerを書かずに印をconsumeし、fallbackには配るものが無い、という連鎖になるためである。timestampで比較すれば、次の`PreCompact`が印より新しいstate fileを書くので、leakした印の被害はleak元のcompaction 1回に閉じる。timestampが同値の場合は配送済みとして扱う。印は必ずstate fileより後に書かれるので、同値は同一compactionを意味するからである。
+
+注入本文にはstate fileの生成時刻も入れる。`PreCompact`のbackendが失敗した回は前回のstate fileがそのまま再注入されるため、その時刻が「このstateは今回圧縮した作業より前のものだ」と読み手へ伝える唯一の手がかりになる。
+
 ## 6. State file format
 
 LLM generated state file と `/compact-plus` manual state file は同じ heading order を使う。

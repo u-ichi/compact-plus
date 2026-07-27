@@ -332,9 +332,59 @@ test_claude_sessionstart_does_not_inject_twice() {
   input='{"session_id":"claude-twice","hook_event_name":"SessionStart","source":"compact"}'
   output=$(COMPACT_PLUS_RUNTIME=claude "$ROOT/hooks/sessionstart-compaction-recovery.sh" <<< "$input")
   assert_contains "$output" "Double guard" "SessionStart injects once"
+  assert_file "$TMPDIR/claude-compact-injected/claude-twice" "SessionStart leaves a mark newer than the state file"
 
+  # The mark covers this compaction's state file, so the guard has to hold even
+  # though the mark is now validated by timestamp rather than by mere existence.
   output=$(COMPACT_PLUS_RUNTIME=claude "$ROOT/hooks/sessionstart-compaction-recovery.sh" <<< "$input")
   assert_empty "$output" "A repeated SessionStart before PostCompact does not inject twice"
+}
+
+# A PostCompact that never completes (hook timeout, kill, crash) leaves the
+# injected mark on disk. If a leftover mark were trusted on sight, the NEXT
+# compaction would go out silently in every channel: SessionStart would skip on
+# the mark, PostCompact would consume the mark instead of arming a marker, and the
+# UserPromptSubmit fallback would find nothing to deliver. The freshly generated
+# state would reach nobody, with no warning anywhere.
+test_stale_injected_mark_does_not_silence_next_compaction() {
+  local input output
+  mkdir -p "$TMPDIR/claude-compact-state" "$TMPDIR/claude-compact-injected"
+
+  # Compaction N injected and then lost its PostCompact, so the mark survives.
+  printf '# Compact Prep State\n## Recovery Notes\nState before the leak\n' \
+    > "$TMPDIR/claude-compact-state/claude-stale.md"
+  printf '1\n' > "$TMPDIR/claude-compact-injected/claude-stale"
+  touch -t 202601010000 "$TMPDIR/claude-compact-injected/claude-stale"
+
+  # Compaction N+1: PreCompact writes a state file newer than the leaked mark.
+  printf '# Compact Prep State\n## Recovery Notes\nState after the leak\n' \
+    > "$TMPDIR/claude-compact-state/claude-stale.md"
+
+  input='{"session_id":"claude-stale","hook_event_name":"SessionStart","source":"compact"}'
+  output=$(COMPACT_PLUS_RUNTIME=claude "$ROOT/hooks/sessionstart-compaction-recovery.sh" <<< "$input")
+  assert_contains "$output" "State after the leak" "A leaked injected mark does not silence the next compaction"
+  assert_file "$TMPDIR/claude-compact-injected/claude-stale" "Injecting past a leaked mark rewrites the mark"
+
+  # The rewritten mark is newer than the state file again, so the guard is back.
+  output=$(COMPACT_PLUS_RUNTIME=claude "$ROOT/hooks/sessionstart-compaction-recovery.sh" <<< "$input")
+  assert_empty "$output" "The refreshed mark blocks a second injection again"
+
+  input='{"session_id":"claude-stale","hook_event_name":"PostCompact","trigger":"auto"}'
+  COMPACT_PLUS_RUNTIME=claude "$ROOT/hooks/compaction-recovery.sh" <<< "$input"
+  assert_not_file "$TMPDIR/claude-compacted/claude-stale" "PostCompact still skips the marker after a recovered injection"
+}
+
+test_injection_reports_when_the_state_was_saved() {
+  local input output
+  mkdir -p "$TMPDIR/claude-compact-state"
+  printf '# Compact Prep State\n## Recovery Notes\nTimestamped\n' \
+    > "$TMPDIR/claude-compact-state/claude-when.md"
+
+  input='{"session_id":"claude-when","hook_event_name":"SessionStart","source":"compact"}'
+  output=$(COMPACT_PLUS_RUNTIME=claude "$ROOT/hooks/sessionstart-compaction-recovery.sh" <<< "$input")
+  assert_contains "$output" "State saved at: " "The injection reports when the state file was written"
+  printf '%s' "$output" | grep -Eq 'State saved at: [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z' \
+    || fail "The saved-at line carries a real UTC timestamp"
 }
 
 # When no SessionStart(source=compact) reaches the session, PostCompact arms the
@@ -542,6 +592,8 @@ test_runtime_path_separation
 test_state_generation_fails_open
 test_claude_first_compaction_injects_at_sessionstart
 test_claude_sessionstart_does_not_inject_twice
+test_stale_injected_mark_does_not_silence_next_compaction
+test_injection_reports_when_the_state_was_saved
 test_claude_userpromptsubmit_is_the_fallback
 test_sessionstart_recovery_edge_cases
 test_large_state_is_truncated

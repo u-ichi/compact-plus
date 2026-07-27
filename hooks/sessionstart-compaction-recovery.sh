@@ -12,9 +12,17 @@
 #   no marker, state present  -> SessionStart ran first; inject and leave an
 #                                injected mark so the later PostCompact knows the
 #                                state was already delivered and skips its marker
-#   injected mark only        -> already injected for this compaction; stay quiet
+#   mark newer than state     -> already injected for this compaction; stay quiet
 #   neither                   -> do nothing, so the PostCompact -> UserPromptSubmit
 #                                fallback still delivers the state
+#
+# The injected mark is only trusted while it is newer than the state file it
+# covers. A PostCompact that never finishes (hook timeout, kill, crash) leaves the
+# mark behind, and treating a leftover mark as authoritative would silence the
+# NEXT compaction completely: SessionStart would skip, PostCompact would consume
+# the mark instead of arming a marker, and the UserPromptSubmit fallback would
+# have nothing to deliver. Comparing against the state file's timestamp keeps a
+# leaked mark from costing more than the compaction it leaked from.
 #
 # fail-open (always exit 0)
 
@@ -27,6 +35,32 @@ source "$SCRIPT_DIR/../scripts/runtime-paths.sh"
 # Cap the inlined state so a large state file cannot crowd out the context it is
 # meant to restore. The full file stays on disk and is referenced when truncated.
 STATE_MAX_BYTES=30720
+
+# Modification time in epoch seconds. GNU stat first, then BSD; the numeric guard
+# keeps a wrong-platform invocation from returning its diagnostic output.
+compact_plus_mtime_epoch() {
+  local out
+  if out=$(stat -c '%Y' "$1" 2>/dev/null) && [[ "$out" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$out"
+    return 0
+  fi
+  if out=$(stat -f '%m' "$1" 2>/dev/null) && [[ "$out" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$out"
+    return 0
+  fi
+  return 1
+}
+
+# When PreCompact's backend fails, the previous compaction's state file is left in
+# place and injected again. Stating when it was written lets the reader judge how
+# current it is instead of assuming it describes the work just compacted.
+compact_plus_saved_at() {
+  local epoch
+  epoch=$(compact_plus_mtime_epoch "$1") || return 1
+  date -u -r "$epoch" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+    || date -u -d "@$epoch" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+    || return 1
+}
 
 INPUT=$(cat)
 SESSION_ID=$(compact_plus_artifact_key "$INPUT")
@@ -48,14 +82,22 @@ if [[ -f "$MARKER" ]]; then
   # Codex order. An injected mark alongside the marker is abnormal; clear both so
   # the pair cannot trigger a second injection later.
   CONSUME_MARKER=1
-elif [[ -f "$INJECTED" ]]; then
+elif [[ ! -f "$STATE_FILE" ]]; then
+  # Nothing was saved for this thread, so there is nothing to inject and
+  # PostCompact still arms the marker for the fallback.
   exit 0
-elif [[ -f "$STATE_FILE" ]]; then
-  # Claude Code order: PostCompact has not run yet, so the state file is the only
-  # evidence that PreCompact just saved something for this thread.
-  WRITE_INJECTED=1
+elif [[ -f "$INJECTED" && ! "$STATE_FILE" -nt "$INJECTED" ]]; then
+  # The mark is at least as new as the state it covers, so this compaction was
+  # already delivered and a repeated SessionStart must stay quiet. Equal
+  # timestamps count as delivered: the mark is always written after the state
+  # file, so a tie means the same compaction, never a leftover from an earlier
+  # one.
+  exit 0
 else
-  exit 0
+  # Claude Code order, or a mark left over from a compaction whose PostCompact
+  # never ran. Either way the state file is newer than any mark, so it has not
+  # been delivered yet.
+  WRITE_INJECTED=1
 fi
 
 # Read the active plan path from the session pointer file.
@@ -74,6 +116,10 @@ if [[ -n "$PLAN_FILE" ]]; then
 fi
 
 if [[ -f "$STATE_FILE" ]]; then
+  SAVED_AT=$(compact_plus_saved_at "$STATE_FILE" || true)
+  if [[ -n "$SAVED_AT" ]]; then
+    CTX+=$'\n'"State saved at: ${SAVED_AT} (if this predates the work just compacted, state generation failed and this is the previous snapshot)."
+  fi
   STATE_BYTES=$(wc -c < "$STATE_FILE" 2>/dev/null | tr -d ' ')
   if [[ "${STATE_BYTES:-0}" -gt "$STATE_MAX_BYTES" ]]; then
     # Drop the final line of the byte slice: it is the only one the cut can split,
