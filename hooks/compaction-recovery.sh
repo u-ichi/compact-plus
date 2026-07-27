@@ -17,10 +17,19 @@ INPUT=$(cat)
 SESSION_ID=$(compact_plus_artifact_key "$INPUT")
 [[ -z "$SESSION_ID" ]] && exit 0
 
-# Write the marker file. The runtime-specific recovery hook consumes it once.
-MARKER_DIR="$COMPACT_PLUS_MARKER_DIR"
-mkdir -p "$MARKER_DIR" 2>/dev/null || true
-printf '%s\n' "$(date +%s)" > "$MARKER_DIR/$SESSION_ID" 2>/dev/null || true
+# On Claude Code, SessionStart(source=compact) runs before this hook and leaves an
+# injected mark once it has delivered the state. Consume that mark instead of
+# writing a marker, otherwise UserPromptSubmit would inject the same state a
+# second time on the next prompt.
+INJECTED="$COMPACT_PLUS_INJECTED_DIR/$SESSION_ID"
+if [[ -f "$INJECTED" ]]; then
+  rm -f "$INJECTED" 2>/dev/null || true
+else
+  # Write the marker file. The recovery hook that runs next consumes it once.
+  MARKER_DIR="$COMPACT_PLUS_MARKER_DIR"
+  mkdir -p "$MARKER_DIR" 2>/dev/null || true
+  printf '%s\n' "$(date +%s)" > "$MARKER_DIR/$SESSION_ID" 2>/dev/null || true
+fi
 
 # Reset the compact reminder cooldown after compact runs.
 WARN_DIR="$COMPACT_PLUS_WARNED_DIR"

@@ -166,10 +166,11 @@ When you pass natural-language instructions, such as `/compact keep the importan
    - `precompact-transcript-backup.sh` copies the transcript JSONL to `~/.claude/backups/transcripts/` or `${CODEX_HOME:-$HOME/.codex}/backups/transcripts/`
    - `precompact-state-summary.sh` applies semantic chunking and tool output squash to the transcript, then calls the primary or fallback backend and writes the 10-section state file
 2. **PostCompact hook**
-   - `compaction-recovery.sh` writes a recovery marker and resets the warning cooldown
+   - `compaction-recovery.sh` resets the warning cooldown, and either consumes the injected mark left by `SessionStart` or writes a recovery marker when no injection has happened yet
 3. **Recovery hook**
    - `sessionstart-compaction-recovery.sh` handles `SessionStart(source=compact)` for both Claude Code and Codex
-   - It consumes the recovery marker exactly once and injects the saved state content, active plan reference when present, and original-source reminder through `additionalContext`
+   - It injects the saved state content, active plan reference when present, and original-source reminder through `additionalContext`
+   - The two runtimes order the compaction hooks differently, so the two hooks agree through a handshake rather than a fixed sequence. Claude Code dispatches `SessionStart(source=compact)` **before** `PostCompact`, so on the first compaction there is no marker yet; the hook injects on the strength of the state file and leaves an injected mark, and the later `PostCompact` consumes that mark instead of arming a marker. Codex dispatches `PostCompact` **first**, so the marker already exists and `SessionStart` consumes it. Either way the state is injected exactly once
    - `userpromptsubmit-compaction-recovery.sh` stays registered as the fallback channel. Codex dispatches the start hook to root threads only, so a thread-spawn subagent receives no start hook after compaction and recovers through the next `UserPromptSubmit`; parent messages reach a subagent as user input. The marker is consumed once, so a thread that already recovered at `SessionStart` is a no-op on the following prompt
    - `userpromptsubmit-compact-plus-reminder.sh` consumes warn markers and injects a lightweight notification plus a three-line state recitation when available
 4. **SessionStart hook**
@@ -199,12 +200,14 @@ State files start with `# Compact Prep State` and use the same 10-section order 
 | `${TMPDIR}/claude-compact-state/<session_id>.md` | `precompact-state-summary.sh` / `/compact-plus` skill | recovery hook / agent | Pre-compaction state |
 | `${TMPDIR}/claude-compact-state-offset/<session_id>` | `precompact-state-summary.sh` | `precompact-state-summary.sh` | Incremental byte offset |
 | `${TMPDIR}/claude-compact-state-counter/<session_id>` | `precompact-state-summary.sh` | `precompact-state-summary.sh` | Refresh cycle counter |
-| `${TMPDIR}/claude-compacted/<session_id>` | `compaction-recovery.sh` | `sessionstart-compaction-recovery.sh` | One-shot PostCompact marker |
+| `${TMPDIR}/claude-compacted/<session_id>` | `compaction-recovery.sh` | `sessionstart-compaction-recovery.sh` / `userpromptsubmit-compaction-recovery.sh` | One-shot PostCompact marker |
+| `${TMPDIR}/claude-compact-injected/<session_id>` | `sessionstart-compaction-recovery.sh` | `compaction-recovery.sh` | Injected mark: `SessionStart` already delivered the state, so `PostCompact` skips the marker |
 | `${TMPDIR}/claude-compact-warn/<session_id>` | base repo `statusline.sh` | `userpromptsubmit-compact-plus-reminder.sh` | Threshold warning |
 | `${TMPDIR}/claude-compact-warned/<session_id>` | `userpromptsubmit-compact-plus-reminder.sh` | statusline / recovery hook | Notification cooldown |
 | `${TMPDIR}/claude-active-plan/<session_id>` | plan-management hook | recovery hook | Active plan path |
 | `${TMPDIR}/codex-compact-state/<thread_id>.md` | `precompact-state-summary.sh` / `/compact-plus` skill | Codex recovery hook / agent | Codex pre-compaction state |
-| `${TMPDIR}/codex-compacted/<thread_id>` | `compaction-recovery.sh` | `sessionstart-compaction-recovery.sh` | Codex one-shot recovery marker |
+| `${TMPDIR}/codex-compacted/<thread_id>` | `compaction-recovery.sh` | `sessionstart-compaction-recovery.sh` / `userpromptsubmit-compaction-recovery.sh` | Codex one-shot recovery marker |
+| `${TMPDIR}/codex-compact-injected/<thread_id>` | `sessionstart-compaction-recovery.sh` | `compaction-recovery.sh` | Codex injected mark for the same handshake |
 | `${TMPDIR}/codex-compact-warned/<thread_id>` | reminder hook | reminder / recovery hook | Codex notification cooldown |
 
 On Codex, `<thread_id>` is the thread that actually compacted. Hook input carries `session_id` as the identity shared by the root thread and all of its descendants, plus `agent_id` for a thread-spawn subagent, so every artifact is keyed on `agent_id` when present and on `session_id` otherwise (`compact_plus_artifact_key` in `scripts/runtime-paths.sh`). Keying on `session_id` alone would file a subagent's state under the parent and overwrite the parent's own state file.

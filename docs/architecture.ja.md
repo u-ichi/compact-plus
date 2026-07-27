@@ -30,8 +30,11 @@ compact-plus に関係する Claude Code hook event:
 | Event | compact-plus の用途 |
 |---|---|
 | `PreCompact` | compaction 前に transcript backup と state file 生成を行う |
-| `PostCompact` | compaction 後に recovery marker を書き、warn cooldown を reset する |
+| `PostCompact` | compaction 後に注入済み印を consume するか recovery marker を書き、warn cooldown を reset する |
 | `SessionStart`, matcher `compact` | 最初のpost-compaction prompt前に保存済みstateを`additionalContext`へ注入する |
+| `UserPromptSubmit` | `SessionStart(source=compact)` が届かなかった thread への fallback 経路 |
+
+Claude Codeは1回のcompactionの中で`SessionStart(source=compact)`を`PostCompact`より**先**に配送する。これはCodexと逆順である。この順序差を吸収するhandshakeは第5節に書く。
 
 Claude Code plugin hook は `hooks/hooks.json` で設定する。`PreCompact` / `PostCompact` では `manual` と `auto` の matcher 値が公式 docs に記載されている。Claude Code docs では、これらの compact event に対して command / HTTP / MCP tool hook が示されており、compact-plus は command hook を使う。
 
@@ -136,13 +139,17 @@ compact-plusはどちらのcompaction promptにも手を入れず、構造化sta
 4. `precompact-state-summary.sh` が大きな Read / Bash output に tool output squash を適用する。
 5. script が primary backend を呼ぶ。失敗し、fallback が有効なら fallback backend を呼ぶ。
 6. state fileをruntime別state directoryへ書く。
-7. `PostCompact` が開始する。
-8. `compaction-recovery.sh`がruntime別markerを書き、warn cooldown markerを削除する。
-9. Claude CodeとCodexは最初のpost-compaction prompt前の`SessionStart(source=compact)`で復旧する。Codexのthread-spawn subagentは圧縮後にstart hookが来ないため、次の`UserPromptSubmit`で復旧する。recovery hookは以下を注入する。
-   - 保存済みstate file本文
+7. compaction hookが走る。発火順はruntimeで異なるため、次の8と9は互いに逆順になる。
+   - Claude Code: `SessionStart(source=compact)` が先、`PostCompact` が後。
+   - Codex: `PostCompact` が先、`SessionStart(source=compact)` が後。
+8. `compaction-recovery.sh`がwarn cooldown markerを削除する。注入済み印がある場合は`SessionStart`が既にstateを届けているので、その印をconsumeしrecovery markerを書かない。無い場合はruntime別markerを書く。
+9. `sessionstart-compaction-recovery.sh`が最初のpost-compaction prompt前に注入する。存在するhandshake signalに応じて動く。markerがあれば`PostCompact`が先に走ったということなのでそれをconsumeする。markerが無くstate fileがあれば`SessionStart`が先に走ったということなので、注入した上で8のために注入済み印を残す。どちらも無ければ何もせず、`PostCompact`から`UserPromptSubmit`へのfallbackを残す。Codexのthread-spawn subagentは圧縮後にstart hookが来ないため、常にこのfallbackで復旧する。recovery hookは以下を注入する。
+   - 保存済みstate file本文 (30720 bytesで打ち切り、全文fileへのpathを併記)
    - active plan path があればその path
    - original-source factual note
 10. Claudeはstatusline warning markerをconsumeする。Codexは現在threadの最新token-count eventから使用率を算出し、`COMPACT_PLUS_CODEX_WARN_THRESHOLD`（default `75`）で通知する。
+
+注入済み印は実際に出力を出した`SessionStart`だけが書くので、このhookを配送しないruntimeでは印が生まれず、`PostCompact`は`UserPromptSubmit` fallback用のmarkerを書き続ける。
 
 ## 6. State file format
 
@@ -168,14 +175,16 @@ heading order を固定することで、compaction 後の hook と agent が同
 | `${TMPDIR:-/tmp}/claude-compact-state/<session_id>.md` | `precompact-state-summary.sh` または `/compact-plus` skill | recovery hook と agent | State payload。state generation ごとに上書き |
 | `${TMPDIR:-/tmp}/claude-compact-state-offset/<session_id>` | `precompact-state-summary.sh` | `precompact-state-summary.sh` | Incremental transcript offset。state generation 内部用 |
 | `${TMPDIR:-/tmp}/claude-compact-state-counter/<session_id>` | `precompact-state-summary.sh` | `precompact-state-summary.sh` | Refresh cadence counter。state generation 内部用 |
-| `${TMPDIR:-/tmp}/claude-compacted/<session_id>` | `compaction-recovery.sh` | `sessionstart-compaction-recovery.sh` | `SessionStart(source=compact)`がconsumeするone-shot recovery trigger |
+| `${TMPDIR:-/tmp}/claude-compacted/<session_id>` | `compaction-recovery.sh` | `sessionstart-compaction-recovery.sh` と `userpromptsubmit-compaction-recovery.sh` | one-shot recovery trigger。`SessionStart`が未注入の時だけ書かれる |
+| `${TMPDIR:-/tmp}/claude-compact-injected/<session_id>` | `sessionstart-compaction-recovery.sh` | `compaction-recovery.sh` | 注入済み印。後から走る`PostCompact`へstate配送済みを伝える |
 | `${TMPDIR:-/tmp}/claude-compact-warn/<session_id>` | base repository statusline hook | `userpromptsubmit-compact-plus-reminder.sh` | Threshold warning。compact-plus は producer を所有しない |
 | `${TMPDIR:-/tmp}/claude-compact-warned/<session_id>` | `userpromptsubmit-compact-plus-reminder.sh` | statusline side と recovery hook | Notification cooldown |
 | `${TMPDIR:-/tmp}/claude-active-plan/<session_id>` | plan-management hook | recovery hook | Active plan pointer。compact-plus は producer を所有しない |
 | `${TMPDIR:-/tmp}/codex-compact-state/<thread_id>.md` | `precompact-state-summary.sh`または`/compact-plus` skill | Codex recovery hookとagent | Codex state payload |
 | `${TMPDIR:-/tmp}/codex-compact-state-offset/<thread_id>` | `precompact-state-summary.sh` | `precompact-state-summary.sh` | Codex incremental transcript offset |
 | `${TMPDIR:-/tmp}/codex-compact-state-counter/<thread_id>` | `precompact-state-summary.sh` | `precompact-state-summary.sh` | Codex full-refresh cadence counter |
-| `${TMPDIR:-/tmp}/codex-compacted/<thread_id>` | `compaction-recovery.sh` | `sessionstart-compaction-recovery.sh` | Codex one-shot recovery trigger |
+| `${TMPDIR:-/tmp}/codex-compacted/<thread_id>` | `compaction-recovery.sh` | `sessionstart-compaction-recovery.sh` と `userpromptsubmit-compaction-recovery.sh` | Codex one-shot recovery trigger |
+| `${TMPDIR:-/tmp}/codex-compact-injected/<thread_id>` | `sessionstart-compaction-recovery.sh` | `compaction-recovery.sh` | 同じhandshake用のCodex注入済み印 |
 | `${TMPDIR:-/tmp}/codex-active-plan/<thread_id>` | 任意の外部plan-management hook | Codex recovery hook | 任意のCodex active-plan pointer |
 | `${TMPDIR:-/tmp}/codex-compact-warned/<thread_id>` | reminder hook | reminderとrecovery hook | Codex通知cooldown |
 | `${CODEX_HOME:-$HOME/.codex}/backups/transcripts/<epoch>-<thread_id>.jsonl` | `precompact-transcript-backup.sh` | Codex recovery hookとagent | Codex transcriptのversioned backup。threadごとに新しい20件を保持 |

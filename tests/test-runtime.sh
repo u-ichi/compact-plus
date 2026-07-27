@@ -289,26 +289,123 @@ test_state_generation_fails_open() {
   assert_not_file "$TMPDIR/codex-compact-state/backend-failure.md" "Backend failure fails open without partial state"
 }
 
-test_claude_recovery_is_sessionstart_one_shot() {
+# Claude Code dispatches SessionStart(source=compact) BEFORE PostCompact inside one
+# compaction, so on the very first compaction there is no marker to gate on. An
+# implementation that waits for the marker injects nothing here and only recovers
+# from the second compaction onward, which is the failure this test pins down.
+test_claude_first_compaction_injects_at_sessionstart() {
   local input output
   mkdir -p "$TMPDIR/claude-compact-state"
-  printf '# Compact Prep State\n## Recovery Notes\nClaude recovery\n' \
-    > "$TMPDIR/claude-compact-state/claude-recovery.md"
+  printf '# Compact Prep State\n## Recovery Notes\nFirst compaction state\n' \
+    > "$TMPDIR/claude-compact-state/claude-first.md"
 
-  input='{"session_id":"claude-recovery","hook_event_name":"PostCompact","trigger":"manual"}'
+  # 1. SessionStart runs first, with no marker and no injected mark on disk.
+  input='{"session_id":"claude-first","hook_event_name":"SessionStart","source":"compact"}'
+  output=$(COMPACT_PLUS_RUNTIME=claude "$ROOT/hooks/sessionstart-compaction-recovery.sh" <<< "$input")
+  assert_contains "$output" '"hookEventName": "SessionStart"' "First compaction injects at SessionStart"
+  assert_contains "$output" "First compaction state" "First compaction injects the saved state content"
+  assert_file "$TMPDIR/claude-compact-injected/claude-first" "SessionStart records that it already injected"
+
+  # 2. PostCompact runs second and must not arm the fallback marker.
+  input='{"session_id":"claude-first","hook_event_name":"PostCompact","trigger":"auto"}'
   COMPACT_PLUS_RUNTIME=claude "$ROOT/hooks/compaction-recovery.sh" <<< "$input"
-  assert_file "$TMPDIR/claude-compacted/claude-recovery" "Claude PostCompact writes a recovery marker"
+  assert_not_file "$TMPDIR/claude-compacted/claude-first" "PostCompact skips the marker after SessionStart injected"
+  assert_not_file "$TMPDIR/claude-compact-injected/claude-first" "PostCompact consumes the injected mark"
 
-  input='{"session_id":"claude-recovery","hook_event_name":"SessionStart","source":"compact"}'
-  output=$(COMPACT_PLUS_RUNTIME=claude "$ROOT/hooks/sessionstart-compaction-recovery.sh" <<< "$input")
-  assert_contains "$output" '"hookEventName": "SessionStart"' "Claude recovery uses SessionStart additionalContext"
-  assert_contains "$output" "Claude recovery" "Claude recovery injects the saved state content"
-  assert_not_file "$TMPDIR/claude-compacted/claude-recovery" "Claude recovery consumes the marker"
+  # 3. The next prompt must not repeat state the session already received.
+  input='{"session_id":"claude-first","hook_event_name":"UserPromptSubmit"}'
+  output=$(COMPACT_PLUS_RUNTIME=claude "$ROOT/hooks/userpromptsubmit-compaction-recovery.sh" <<< "$input")
+  assert_empty "$output" "UserPromptSubmit does not repeat state injected at SessionStart"
 
+  # 4. A later compaction repeats the cycle instead of staying suppressed.
+  input='{"session_id":"claude-first","hook_event_name":"SessionStart","source":"compact"}'
   output=$(COMPACT_PLUS_RUNTIME=claude "$ROOT/hooks/sessionstart-compaction-recovery.sh" <<< "$input")
-  assert_empty "$output" "Claude recovery is one-shot"
+  assert_contains "$output" "First compaction state" "A later compaction injects again"
 }
 
+test_claude_sessionstart_does_not_inject_twice() {
+  local input output
+  mkdir -p "$TMPDIR/claude-compact-state"
+  printf '# Compact Prep State\n## Recovery Notes\nDouble guard\n' \
+    > "$TMPDIR/claude-compact-state/claude-twice.md"
+
+  input='{"session_id":"claude-twice","hook_event_name":"SessionStart","source":"compact"}'
+  output=$(COMPACT_PLUS_RUNTIME=claude "$ROOT/hooks/sessionstart-compaction-recovery.sh" <<< "$input")
+  assert_contains "$output" "Double guard" "SessionStart injects once"
+
+  output=$(COMPACT_PLUS_RUNTIME=claude "$ROOT/hooks/sessionstart-compaction-recovery.sh" <<< "$input")
+  assert_empty "$output" "A repeated SessionStart before PostCompact does not inject twice"
+}
+
+# When no SessionStart(source=compact) reaches the session, PostCompact arms the
+# marker and UserPromptSubmit stays the delivery channel.
+test_claude_userpromptsubmit_is_the_fallback() {
+  local input output
+  mkdir -p "$TMPDIR/claude-compact-state"
+  printf '# Compact Prep State\n## Recovery Notes\nFallback state\n' \
+    > "$TMPDIR/claude-compact-state/claude-fallback.md"
+
+  input='{"session_id":"claude-fallback","hook_event_name":"PostCompact","trigger":"manual"}'
+  COMPACT_PLUS_RUNTIME=claude "$ROOT/hooks/compaction-recovery.sh" <<< "$input"
+  assert_file "$TMPDIR/claude-compacted/claude-fallback" "PostCompact arms the marker when SessionStart did not inject"
+
+  input='{"session_id":"claude-fallback","hook_event_name":"UserPromptSubmit"}'
+  output=$(COMPACT_PLUS_RUNTIME=claude "$ROOT/hooks/userpromptsubmit-compaction-recovery.sh" <<< "$input")
+  assert_contains "$output" '"hookEventName": "UserPromptSubmit"' "UserPromptSubmit still recovers when SessionStart did not"
+  assert_contains "$output" "$TMPDIR/claude-compact-state/claude-fallback.md" "Fallback recovery references the state file"
+  assert_not_file "$TMPDIR/claude-compacted/claude-fallback" "Fallback recovery consumes the marker"
+}
+
+test_sessionstart_recovery_edge_cases() {
+  local input output src
+  mkdir -p "$TMPDIR/claude-compact-state"
+  printf '# Compact Prep State\n## Recovery Notes\nEdge state\n' \
+    > "$TMPDIR/claude-compact-state/claude-edge.md"
+
+  for src in startup resume clear fork; do
+    input=$(jq -nc --arg s "$src" '{session_id:"claude-edge",hook_event_name:"SessionStart",source:$s}')
+    output=$(COMPACT_PLUS_RUNTIME=claude "$ROOT/hooks/sessionstart-compaction-recovery.sh" <<< "$input")
+    assert_empty "$output" "SessionStart source=$src does not inject"
+  done
+  assert_not_file "$TMPDIR/claude-compact-injected/claude-edge" "A non-compact SessionStart leaves no injected mark"
+
+  input='{"hook_event_name":"SessionStart","source":"compact"}'
+  output=$(COMPACT_PLUS_RUNTIME=claude "$ROOT/hooks/sessionstart-compaction-recovery.sh" <<< "$input")
+  assert_empty "$output" "SessionStart without a session id injects nothing"
+
+  # No state and no marker: stay silent so PostCompact can still arm the fallback.
+  input='{"session_id":"claude-nothing","hook_event_name":"SessionStart","source":"compact"}'
+  output=$(COMPACT_PLUS_RUNTIME=claude "$ROOT/hooks/sessionstart-compaction-recovery.sh" <<< "$input")
+  assert_empty "$output" "SessionStart without state or marker leaves the fallback alone"
+  assert_not_file "$TMPDIR/claude-compact-injected/claude-nothing" "No injected mark is left without state"
+
+  input='{"session_id":"claude-nothing","hook_event_name":"PostCompact","trigger":"auto"}'
+  COMPACT_PLUS_RUNTIME=claude "$ROOT/hooks/compaction-recovery.sh" <<< "$input"
+  assert_file "$TMPDIR/claude-compacted/claude-nothing" "PostCompact still arms the marker when SessionStart stayed silent"
+}
+
+test_large_state_is_truncated() {
+  local input output
+  mkdir -p "$TMPDIR/claude-compact-state"
+  {
+    printf '# Compact Prep State\n## Recovery Notes\n'
+    awk 'BEGIN { for (i = 1; i <= 4000; i++) printf "state line %d padding padding padding\n", i }'
+    printf 'TAIL_SENTINEL\n'
+  } > "$TMPDIR/claude-compact-state/claude-big.md"
+
+  input='{"session_id":"claude-big","hook_event_name":"SessionStart","source":"compact"}'
+  output=$(COMPACT_PLUS_RUNTIME=claude "$ROOT/hooks/sessionstart-compaction-recovery.sh" <<< "$input")
+  assert_contains "$output" "State truncated at 30720 bytes" "An oversized state file is truncated"
+  assert_contains "$output" "$TMPDIR/claude-compact-state/claude-big.md" "A truncated injection points at the full state file"
+  if printf '%s' "$output" | grep -Fq "TAIL_SENTINEL"; then
+    fail "A truncated injection stops before the end of an oversized state file"
+  fi
+  printf '%s' "$output" | jq -e '.hookSpecificOutput.additionalContext' >/dev/null 2>&1 \
+    || fail "A truncated injection is still valid JSON"
+}
+
+# Codex dispatches PostCompact BEFORE SessionStart(source=compact), so the marker
+# is already on disk when the start hook runs.
 test_codex_recovery_is_one_shot() {
   local input output
   mkdir -p "$TMPDIR/codex-compact-state"
@@ -325,9 +422,34 @@ test_codex_recovery_is_one_shot() {
   assert_contains "$output" '"hookEventName": "SessionStart"' "Codex recovery uses SessionStart additionalContext"
   assert_contains "$output" "Synthetic recovery" "Codex recovery injects the saved state content"
   assert_not_file "$TMPDIR/codex-compacted/codex-recovery" "Codex recovery consumes the marker"
+  assert_not_file "$TMPDIR/codex-compact-injected/codex-recovery" "Consuming a marker leaves no injected mark behind"
 
+  # The marker is the only thing UserPromptSubmit gates on, so consuming it is what
+  # keeps the same state from arriving a second time on the next prompt.
+  input='{"session_id":"codex-recovery","hook_event_name":"UserPromptSubmit"}'
+  output=$(COMPACT_PLUS_RUNTIME=codex "$ROOT/hooks/userpromptsubmit-compaction-recovery.sh" <<< "$input")
+  assert_empty "$output" "Codex recovery is one-shot across the compaction"
+}
+
+# Abnormal pairing: a marker and an injected mark both present must still produce
+# exactly one injection and leave neither file behind.
+test_marker_and_injected_mark_inject_once() {
+  local input output
+  mkdir -p "$TMPDIR/codex-compact-state" "$TMPDIR/codex-compacted" "$TMPDIR/codex-compact-injected"
+  printf '# Compact Prep State\n## Recovery Notes\nBoth markers\n' \
+    > "$TMPDIR/codex-compact-state/codex-both.md"
+  printf '1\n' > "$TMPDIR/codex-compacted/codex-both"
+  printf '1\n' > "$TMPDIR/codex-compact-injected/codex-both"
+
+  input='{"session_id":"codex-both","hook_event_name":"SessionStart","source":"compact"}'
   output=$(COMPACT_PLUS_RUNTIME=codex "$ROOT/hooks/sessionstart-compaction-recovery.sh" <<< "$input")
-  assert_empty "$output" "Codex recovery is one-shot"
+  assert_contains "$output" "Both markers" "A marker plus an injected mark still injects"
+  assert_not_file "$TMPDIR/codex-compacted/codex-both" "Both-marker recovery consumes the marker"
+  assert_not_file "$TMPDIR/codex-compact-injected/codex-both" "Both-marker recovery consumes the injected mark"
+
+  input='{"session_id":"codex-both","hook_event_name":"UserPromptSubmit"}'
+  output=$(COMPACT_PLUS_RUNTIME=codex "$ROOT/hooks/userpromptsubmit-compaction-recovery.sh" <<< "$input")
+  assert_empty "$output" "Both-marker recovery does not inject a second time on the next prompt"
 }
 
 test_codex_subagent_keys_on_agent_id() {
@@ -418,8 +540,13 @@ test_claude_warning_threshold_is_independent
 test_codex_warning_threshold
 test_runtime_path_separation
 test_state_generation_fails_open
-test_claude_recovery_is_sessionstart_one_shot
+test_claude_first_compaction_injects_at_sessionstart
+test_claude_sessionstart_does_not_inject_twice
+test_claude_userpromptsubmit_is_the_fallback
+test_sessionstart_recovery_edge_cases
+test_large_state_is_truncated
 test_codex_recovery_is_one_shot
+test_marker_and_injected_mark_inject_once
 test_codex_subagent_keys_on_agent_id
 test_codex_root_thread_recovers_once
 
