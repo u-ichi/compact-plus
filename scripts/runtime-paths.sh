@@ -15,6 +15,7 @@ fi
 case "$COMPACT_PLUS_RUNTIME_NAME" in
   codex)
     COMPACT_PLUS_STATE_DIR="${TMPDIR:-/tmp}/codex-compact-state" # lint:allow-os-tmp
+    COMPACT_PLUS_PENDING_DIR="${TMPDIR:-/tmp}/codex-compact-pending" # lint:allow-os-tmp
     COMPACT_PLUS_OFFSET_DIR="${TMPDIR:-/tmp}/codex-compact-state-offset" # lint:allow-os-tmp
     COMPACT_PLUS_COUNTER_DIR="${TMPDIR:-/tmp}/codex-compact-state-counter" # lint:allow-os-tmp
     COMPACT_PLUS_MARKER_DIR="${TMPDIR:-/tmp}/codex-compacted" # lint:allow-os-tmp
@@ -27,6 +28,7 @@ case "$COMPACT_PLUS_RUNTIME_NAME" in
   claude|*)
     COMPACT_PLUS_RUNTIME_NAME="claude"
     COMPACT_PLUS_STATE_DIR="${TMPDIR:-/tmp}/claude-compact-state" # lint:allow-os-tmp
+    COMPACT_PLUS_PENDING_DIR="${TMPDIR:-/tmp}/claude-compact-pending" # lint:allow-os-tmp
     COMPACT_PLUS_OFFSET_DIR="${TMPDIR:-/tmp}/claude-compact-state-offset" # lint:allow-os-tmp
     COMPACT_PLUS_COUNTER_DIR="${TMPDIR:-/tmp}/claude-compact-state-counter" # lint:allow-os-tmp
     COMPACT_PLUS_MARKER_DIR="${TMPDIR:-/tmp}/claude-compacted" # lint:allow-os-tmp
@@ -53,6 +55,7 @@ compact_plus_artifact_key() {
 
 export COMPACT_PLUS_RUNTIME_NAME
 export COMPACT_PLUS_STATE_DIR
+export COMPACT_PLUS_PENDING_DIR
 export COMPACT_PLUS_OFFSET_DIR
 export COMPACT_PLUS_COUNTER_DIR
 export COMPACT_PLUS_MARKER_DIR

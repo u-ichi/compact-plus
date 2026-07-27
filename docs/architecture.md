@@ -122,28 +122,25 @@ compact-plus does not touch either compaction prompt. It places structured state
 
 1. `PreCompact` starts.
 2. `precompact-transcript-backup.sh` copies the transcript JSONL to the runtime-specific backup directory.
-3. `precompact-state-summary.sh` reads the transcript according to the configured mode:
+3. `precompact-state-summary.sh` writes a pending compact-event token and starts a detached state-generation worker, then returns without waiting for the backend.
+4. The worker reads the transcript according to the configured mode:
    - `incremental`: read new bytes since the previous run, with periodic full refresh.
    - `head-tail`: keep early context and recent context.
    - `tail`: keep only recent context.
-4. `precompact-state-summary.sh` applies tool output squash to large Read and Bash outputs.
-5. The script calls the primary backend. If that fails and fallback is enabled, it calls the fallback backend.
-6. The state file is written to the runtime-specific state directory.
-7. The compaction hooks run. Their order differs by runtime, so steps 8 and 9 happen in the opposite sequence on each:
+5. `precompact-state-summary.sh` applies tool output squash to large Read and Bash outputs.
+6. The worker calls the primary backend. If that fails and fallback is enabled, it calls the fallback backend.
+7. The worker tags successful output with the pending compact-event token and atomically writes the state file.
+8. The compaction hooks run. Their order differs by runtime, so steps 9 and 10 happen in the opposite sequence on each:
    - Claude Code: `SessionStart(source=compact)` first, then `PostCompact`.
    - Codex: `PostCompact` first, then `SessionStart(source=compact)`.
-8. `compaction-recovery.sh` removes its warning cooldown marker. If an injected mark is present, `SessionStart` already delivered the state, so it consumes that mark and writes no recovery marker. Otherwise it writes the runtime-specific marker.
-9. `sessionstart-compaction-recovery.sh` injects before the first post-compaction prompt. It takes whichever handshake signal exists: a marker means `PostCompact` already ran, so it consumes it; no marker with a state file on disk means `SessionStart` ran first, so it injects and leaves an injected mark for step 8. With neither signal it stays silent and leaves the `PostCompact` to `UserPromptSubmit` fallback intact. A Codex thread-spawn subagent receives no start hook after compaction, so it always recovers through that fallback. The recovery hook injects:
+9. `compaction-recovery.sh` removes its warning cooldown marker. If an injected mark is present, `SessionStart` already delivered the state, so it consumes that mark and writes no recovery marker. Otherwise it writes the runtime-specific marker.
+10. `sessionstart-compaction-recovery.sh` injects only a state whose event token matches the pending compact event. If the worker is still running, it stays silent until the marker-driven channel can retry. A Codex thread-spawn subagent receives no start hook after compaction, so it recovers through `UserPromptSubmit`. The recovery hook injects:
    - saved state file content, truncated at 30720 bytes with a pointer to the full file,
    - active plan path when present,
    - original-source factual note.
-10. Claude consumes the statusline marker. Codex calculates usage from the latest current-thread token-count event and warns at `COMPACT_PLUS_CODEX_WARN_THRESHOLD` (default `75`).
+11. Claude consumes the statusline marker. Codex calculates usage from the latest current-thread token-count event and warns at `COMPACT_PLUS_CODEX_WARN_THRESHOLD` (default `75`).
 
-Because the injected mark is written only by a `SessionStart` that actually produced output, a runtime that never dispatches that hook never grows a mark, and its `PostCompact` keeps arming the marker for the `UserPromptSubmit` fallback.
-
-The mark is trusted only while it is newer than the state file it covers. A `PostCompact` that never finishes, because the hook timed out or the process was killed, leaves its mark behind. Treating that leftover as authoritative would make the next compaction disappear from every channel at once: `SessionStart` would skip on the mark, `PostCompact` would consume the mark instead of arming a marker, and the fallback would have nothing to deliver. Comparing timestamps confines a leaked mark to the compaction it leaked from, since the next `PreCompact` writes a state file newer than it. Equal timestamps count as delivered, because the mark is always written after the state file and a tie therefore means the same compaction.
-
-The injected payload also reports when the state file was written. When `PreCompact`'s backend fails, the previous state file stays on disk and is injected again, so the timestamp is what tells the reader that the state predates the work just compacted.
+The pending compact-event token prevents a state generated for an earlier compaction from being presented as the current recovery state. A manually prepared state carries an explicit readiness marker, which the next PreCompact event records in the pending token; an older generated state has no matching token and is not injected.
 
 ## 6. State File Format
 
@@ -166,7 +163,8 @@ The stable heading order lets hooks and agents skim the file predictably after c
 
 | Path | Writer | Reader | Ownership rule |
 |---|---|---|---|
-| `${TMPDIR:-/tmp}/claude-compact-state/<session_id>.md` | `precompact-state-summary.sh` or `/compact-plus` skill | recovery hook and agent | State payload. Rewritten by each state-generation run |
+| `${TMPDIR:-/tmp}/claude-compact-state/<session_id>.md` | `precompact-state-summary.sh` or `/compact-plus` skill | recovery hook and agent | State payload. Worker output carries the compact-event token |
+| `${TMPDIR:-/tmp}/claude-compact-pending/<session_id>` | `precompact-state-summary.sh` | recovery hooks | Pending compact-event token and manual-state flag; stale-state guard |
 | `${TMPDIR:-/tmp}/claude-compact-state-offset/<session_id>` | `precompact-state-summary.sh` | `precompact-state-summary.sh` | Incremental transcript offset. Internal to state generation |
 | `${TMPDIR:-/tmp}/claude-compact-state-counter/<session_id>` | `precompact-state-summary.sh` | `precompact-state-summary.sh` | Refresh cadence counter. Internal to state generation |
 | `${TMPDIR:-/tmp}/claude-compacted/<session_id>` | `compaction-recovery.sh` | `sessionstart-compaction-recovery.sh` and `userpromptsubmit-compaction-recovery.sh` | One-shot recovery trigger. Written only when `SessionStart` has not already injected |
@@ -174,7 +172,8 @@ The stable heading order lets hooks and agents skim the file predictably after c
 | `${TMPDIR:-/tmp}/claude-compact-warn/<session_id>` | Base repository statusline hook | `userpromptsubmit-compact-plus-reminder.sh` | Threshold warning. compact-plus reads but does not own the producer |
 | `${TMPDIR:-/tmp}/claude-compact-warned/<session_id>` | `userpromptsubmit-compact-plus-reminder.sh` | statusline side and recovery hook | Notification cooldown |
 | `${TMPDIR:-/tmp}/claude-active-plan/<session_id>` | plan-management hook | recovery hook | Active plan pointer. compact-plus reads but does not own the producer |
-| `${TMPDIR:-/tmp}/codex-compact-state/<thread_id>.md` | `precompact-state-summary.sh` or `/compact-plus` skill | Codex recovery hook and agent | Codex state payload |
+| `${TMPDIR:-/tmp}/codex-compact-state/<thread_id>.md` | `precompact-state-summary.sh` or `/compact-plus` skill | Codex recovery hook and agent | Codex state payload. Worker output carries the compact-event token |
+| `${TMPDIR:-/tmp}/codex-compact-pending/<thread_id>` | `precompact-state-summary.sh` | Codex recovery hooks | Pending compact-event token and manual-state flag; stale-state guard |
 | `${TMPDIR:-/tmp}/codex-compact-state-offset/<thread_id>` | `precompact-state-summary.sh` | `precompact-state-summary.sh` | Codex incremental transcript offset |
 | `${TMPDIR:-/tmp}/codex-compact-state-counter/<thread_id>` | `precompact-state-summary.sh` | `precompact-state-summary.sh` | Codex full-refresh cadence counter |
 | `${TMPDIR:-/tmp}/codex-compacted/<thread_id>` | `compaction-recovery.sh` | `sessionstart-compaction-recovery.sh` and `userpromptsubmit-compaction-recovery.sh` | Codex one-shot recovery trigger |

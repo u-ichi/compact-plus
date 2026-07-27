@@ -39,10 +39,11 @@ runtime-specific state directory.
 3. Check TaskList, active plan file, tmux-bridge state, and files currently being edited.
    - Read the relevant active plan file under `~/.claude/plans/` when one is present.
    - If tmux-bridge is not used, record `Not used`.
-4. Save the following headings to the state file in this exact order.
+4. Save the following headings to the state file in this exact order. Add the manual-preparation marker immediately after the title so the next PreCompact event can distinguish this intentional snapshot from an older generated state.
 
 ```markdown
 # Compact Prep State
+<!-- compact-plus-manual-ready -->
 ## Active Plan
 ## Current Phase
 ## TaskList Summary

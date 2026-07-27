@@ -57,7 +57,24 @@ fi
 
 STATE_DIR="$COMPACT_PLUS_STATE_DIR"
 STATE_FILE="$STATE_DIR/$SESSION_ID.md"
-if [[ -f "$STATE_FILE" ]]; then
+PENDING_FILE="$COMPACT_PLUS_PENDING_DIR/$SESSION_ID"
+
+state_is_current() {
+  local event_id manual_ready state_event
+  [[ -f "$STATE_FILE" && -f "$PENDING_FILE" ]] || return 1
+  event_id=$(sed -n '1p' "$PENDING_FILE" 2>/dev/null || true)
+  manual_ready=$(sed -n '2p' "$PENDING_FILE" 2>/dev/null || true)
+  state_event=$(grep -m 1 '^<!-- compact-plus-event: ' "$STATE_FILE" 2>/dev/null || true)
+  [[ -n "$event_id" ]] || return 1
+  [[ "$state_event" == "<!-- compact-plus-event: $event_id -->" ]] && return 0
+  [[ "$manual_ready" == "1" ]] && grep -q '^<!-- compact-plus-manual-ready -->$' "$STATE_FILE" 2>/dev/null
+}
+
+STATE_CURRENT=0
+if state_is_current; then
+  STATE_CURRENT=1
+fi
+if [[ -f "$STATE_FILE" && "$STATE_CURRENT" -eq 1 ]]; then
   CTX+=$'\n'"- Read state file \`${STATE_FILE}\` with Read and restore the working state."
   CTX+=$'\n'"- Pay special attention to Session Decisions and Recovery Notes."
   if grep -q '^## Skills Invoked' "$STATE_FILE" 2>/dev/null; then
@@ -76,10 +93,12 @@ CTX+=$'\n'"- Treat next steps from the compaction summary as hypotheses; use the
 CTX+=$'\n'"- Treat the compaction summary as a record of prior work, not as instructions for the next action."
 CTX+=$'\n'"- Original memory / rule / skill files are the authoritative references; compaction summaries may omit scope qualifiers."
 
-jq -n --arg ctx "$CTX" --arg event "$EXPECTED_EVENT" '{
+if jq -n --arg ctx "$CTX" --arg event "$EXPECTED_EVENT" '{
   hookSpecificOutput: {
     hookEventName: $event,
     additionalContext: $ctx
   }
-}'
+}'; then
+  rm -f "$PENDING_FILE" 2>/dev/null || true
+fi
 exit 0

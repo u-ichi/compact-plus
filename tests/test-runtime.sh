@@ -35,6 +35,29 @@ assert_empty() {
   [[ -z "$1" ]] || fail "$2 (got: $1)"
 }
 
+wait_for_file() {
+  local path="$1"
+  local message="$2"
+  for _ in $(seq 1 50); do
+    [[ -f "$path" ]] && return 0
+    sleep 0.1
+  done
+  fail "$message (missing: $path)"
+}
+
+mark_recovery_state() {
+  local runtime="$1"
+  local session_id="$2"
+  local event_id="test-event-$session_id"
+  local state_file="$TMPDIR/${runtime}-compact-state/$session_id.md"
+  local pending_file="$TMPDIR/${runtime}-compact-pending/$session_id"
+  local state_tmp="$TEST_ROOT/state-mark.$session_id"
+  { IFS= read -r first; printf '%s\n<!-- compact-plus-event: %s -->\n' "$first" "$event_id"; while IFS= read -r line || [[ -n "$line" ]]; do printf '%s\n' "$line"; done; } < "$state_file" > "$state_tmp"
+  mv "$state_tmp" "$state_file"
+  mkdir -p "$(dirname "$pending_file")"
+  printf '%s\n0\n' "$event_id" > "$pending_file"
+}
+
 write_rollout() {
   local path="$1"
   local session_id="$2"
@@ -333,6 +356,7 @@ test_runtime_path_separation() {
     COMPACT_PLUS_PRIMARY_BACKEND="bash \"$backend\"" \
     COMPACT_PLUS_FALLBACK_BACKEND="" \
     "$ROOT/hooks/precompact-state-summary.sh" <<< "$input"
+  wait_for_file "$TMPDIR/codex-compact-state/codex-state.md" "Codex async state generation completes"
   assert_file "$TMPDIR/codex-compact-state/codex-state.md" "Codex state uses the Codex state directory"
   assert_not_file "$TMPDIR/claude-compact-state/codex-state.md" "Codex state does not use the Claude state directory"
   if [[ -f "$capture" ]]; then
@@ -352,6 +376,7 @@ test_runtime_path_separation() {
     COMPACT_PLUS_PRIMARY_BACKEND="bash \"$backend\"" \
     COMPACT_PLUS_FALLBACK_BACKEND="" \
     "$ROOT/hooks/precompact-state-summary.sh" <<< "$input"
+  wait_for_file "$TMPDIR/claude-compact-state/claude-state.md" "Claude async state generation completes"
   assert_file "$TMPDIR/claude-compact-state/claude-state.md" "Claude state path remains unchanged"
 
   input=$(jq -nc --arg path "$rollout" '{
@@ -364,6 +389,43 @@ test_runtime_path_separation() {
   if ! find "$CODEX_HOME/backups/transcripts" -type f -name '*-codex-backup.jsonl' -print -quit 2>/dev/null | grep -q .; then
     fail "Codex transcript backup uses CODEX_HOME"
   fi
+}
+
+test_precompact_returns_before_slow_backend_finishes() {
+  local input rollout backend start end elapsed
+  rollout="$TEST_ROOT/slow-backend.jsonl"
+  backend="$TEST_ROOT/slow-backend.sh"
+  : > "$rollout"
+  for i in $(seq 1 2400); do
+    printf '{"type":"assistant","message":{"content":[{"type":"text","text":"turn %s realistic transcript payload with decisions and tool output"}]}}\n' "$i" >> "$rollout"
+  done
+  printf '%s\n' '#!/usr/bin/env bash' 'sleep 2' 'exit 1' > "$backend"
+  chmod +x "$backend"
+  input=$(jq -nc --arg path "$rollout" '{session_id:"slow-backend",transcript_path:$path,trigger:"auto",hook_event_name:"PreCompact"}')
+
+  start=$(date +%s%N)
+  COMPACT_PLUS_RUNTIME=claude \
+    COMPACT_PLUS_TRANSCRIPT_MODE=tail \
+    COMPACT_PLUS_PRIMARY_BACKEND="bash \"$backend\"" \
+    COMPACT_PLUS_FALLBACK_BACKEND='' \
+    "$ROOT/hooks/precompact-state-summary.sh" <<< "$input"
+  end=$(date +%s%N)
+  elapsed=$(( (end - start) / 1000000 ))
+  if [[ "$elapsed" -ge 1000 ]]; then
+    fail "PreCompact returns within 1 second even when the backend sleeps (took ${elapsed}ms)"
+  fi
+}
+
+test_sessionstart_rejects_state_from_an_older_compact_event() {
+  local input output
+  mkdir -p "$TMPDIR/claude-compact-state" "$TMPDIR/claude-compact-pending"
+  printf '# Compact Prep State\n<!-- compact-plus-event: old-event -->\n## Recovery Notes\nOld state\n' \
+    > "$TMPDIR/claude-compact-state/stale-event.md"
+  printf 'new-event\n0\n' > "$TMPDIR/claude-compact-pending/stale-event"
+
+  input='{"session_id":"stale-event","hook_event_name":"SessionStart","source":"compact"}'
+  output=$(COMPACT_PLUS_RUNTIME=claude "$ROOT/hooks/sessionstart-compaction-recovery.sh" <<< "$input")
+  assert_empty "$output" "SessionStart does not inject state from an older compact event"
 }
 
 test_state_generation_fails_open() {
@@ -402,6 +464,7 @@ test_claude_first_compaction_injects_at_sessionstart() {
   mkdir -p "$TMPDIR/claude-compact-state"
   printf '# Compact Prep State\n## Recovery Notes\nFirst compaction state\n' \
     > "$TMPDIR/claude-compact-state/claude-first.md"
+  mark_recovery_state claude claude-first
 
   # 1. SessionStart runs first, with no marker and no injected mark on disk.
   input='{"session_id":"claude-first","hook_event_name":"SessionStart","source":"compact"}'
@@ -422,6 +485,7 @@ test_claude_first_compaction_injects_at_sessionstart() {
   assert_empty "$output" "UserPromptSubmit does not repeat state injected at SessionStart"
 
   # 4. A later compaction repeats the cycle instead of staying suppressed.
+  mark_recovery_state claude claude-first
   input='{"session_id":"claude-first","hook_event_name":"SessionStart","source":"compact"}'
   output=$(COMPACT_PLUS_RUNTIME=claude "$ROOT/hooks/sessionstart-compaction-recovery.sh" <<< "$input")
   assert_contains "$output" "First compaction state" "A later compaction injects again"
@@ -432,6 +496,7 @@ test_claude_sessionstart_does_not_inject_twice() {
   mkdir -p "$TMPDIR/claude-compact-state"
   printf '# Compact Prep State\n## Recovery Notes\nDouble guard\n' \
     > "$TMPDIR/claude-compact-state/claude-twice.md"
+  mark_recovery_state claude claude-twice
 
   input='{"session_id":"claude-twice","hook_event_name":"SessionStart","source":"compact"}'
   output=$(COMPACT_PLUS_RUNTIME=claude "$ROOT/hooks/sessionstart-compaction-recovery.sh" <<< "$input")
@@ -463,6 +528,7 @@ test_stale_injected_mark_does_not_silence_next_compaction() {
   # Compaction N+1: PreCompact writes a state file newer than the leaked mark.
   printf '# Compact Prep State\n## Recovery Notes\nState after the leak\n' \
     > "$TMPDIR/claude-compact-state/claude-stale.md"
+  mark_recovery_state claude claude-stale
 
   input='{"session_id":"claude-stale","hook_event_name":"SessionStart","source":"compact"}'
   output=$(COMPACT_PLUS_RUNTIME=claude "$ROOT/hooks/sessionstart-compaction-recovery.sh" <<< "$input")
@@ -483,6 +549,7 @@ test_injection_reports_when_the_state_was_saved() {
   mkdir -p "$TMPDIR/claude-compact-state"
   printf '# Compact Prep State\n## Recovery Notes\nTimestamped\n' \
     > "$TMPDIR/claude-compact-state/claude-when.md"
+  mark_recovery_state claude claude-when
 
   input='{"session_id":"claude-when","hook_event_name":"SessionStart","source":"compact"}'
   output=$(COMPACT_PLUS_RUNTIME=claude "$ROOT/hooks/sessionstart-compaction-recovery.sh" <<< "$input")
@@ -498,6 +565,7 @@ test_claude_userpromptsubmit_is_the_fallback() {
   mkdir -p "$TMPDIR/claude-compact-state"
   printf '# Compact Prep State\n## Recovery Notes\nFallback state\n' \
     > "$TMPDIR/claude-compact-state/claude-fallback.md"
+  mark_recovery_state claude claude-fallback
 
   input='{"session_id":"claude-fallback","hook_event_name":"PostCompact","trigger":"manual"}'
   COMPACT_PLUS_RUNTIME=claude "$ROOT/hooks/compaction-recovery.sh" <<< "$input"
@@ -515,6 +583,7 @@ test_sessionstart_recovery_edge_cases() {
   mkdir -p "$TMPDIR/claude-compact-state"
   printf '# Compact Prep State\n## Recovery Notes\nEdge state\n' \
     > "$TMPDIR/claude-compact-state/claude-edge.md"
+  mark_recovery_state claude claude-edge
 
   for src in startup resume clear fork; do
     input=$(jq -nc --arg s "$src" '{session_id:"claude-edge",hook_event_name:"SessionStart",source:$s}')
@@ -546,6 +615,7 @@ test_large_state_is_truncated() {
     awk 'BEGIN { for (i = 1; i <= 4000; i++) printf "state line %d padding padding padding\n", i }'
     printf 'TAIL_SENTINEL\n'
   } > "$TMPDIR/claude-compact-state/claude-big.md"
+  mark_recovery_state claude claude-big
 
   input='{"session_id":"claude-big","hook_event_name":"SessionStart","source":"compact"}'
   output=$(COMPACT_PLUS_RUNTIME=claude "$ROOT/hooks/sessionstart-compaction-recovery.sh" <<< "$input")
@@ -565,6 +635,7 @@ test_codex_recovery_is_one_shot() {
   mkdir -p "$TMPDIR/codex-compact-state"
   printf '# Compact Prep State\n## Recovery Notes\nSynthetic recovery\n' \
     > "$TMPDIR/codex-compact-state/codex-recovery.md"
+  mark_recovery_state codex codex-recovery
 
   input='{"session_id":"codex-recovery","hook_event_name":"PostCompact","trigger":"manual"}'
   COMPACT_PLUS_RUNTIME=codex "$ROOT/hooks/compaction-recovery.sh" <<< "$input"
@@ -592,6 +663,7 @@ test_marker_and_injected_mark_inject_once() {
   mkdir -p "$TMPDIR/codex-compact-state" "$TMPDIR/codex-compacted" "$TMPDIR/codex-compact-injected"
   printf '# Compact Prep State\n## Recovery Notes\nBoth markers\n' \
     > "$TMPDIR/codex-compact-state/codex-both.md"
+  mark_recovery_state codex codex-both
   printf '1\n' > "$TMPDIR/codex-compacted/codex-both"
   printf '1\n' > "$TMPDIR/codex-compact-injected/codex-both"
 
@@ -629,6 +701,7 @@ test_codex_subagent_keys_on_agent_id() {
     COMPACT_PLUS_PRIMARY_BACKEND="bash \"$backend\"" \
     COMPACT_PLUS_FALLBACK_BACKEND="" \
     "$ROOT/hooks/precompact-state-summary.sh" <<< "$input"
+  wait_for_file "$TMPDIR/codex-compact-state/child-thread.md" "Subagent async state generation completes"
   assert_file "$TMPDIR/codex-compact-state/child-thread.md" "Subagent state uses the subagent thread id"
   assert_not_file "$TMPDIR/codex-compact-state/root-thread.md" "Subagent state does not overwrite the root thread state"
 
@@ -673,6 +746,7 @@ test_codex_root_thread_recovers_once() {
   mkdir -p "$TMPDIR/codex-compact-state"
   printf '# Compact Prep State\n## Recovery Notes\nRoot thread recovery\n' \
     > "$TMPDIR/codex-compact-state/root-once.md"
+  mark_recovery_state codex root-once
 
   input='{"session_id":"root-once","hook_event_name":"PostCompact","trigger":"auto"}'
   COMPACT_PLUS_RUNTIME=codex "$ROOT/hooks/compaction-recovery.sh" <<< "$input"
@@ -694,6 +768,8 @@ test_runtime_auto_detection
 test_claude_warning_threshold_is_independent
 test_codex_warning_threshold
 test_runtime_path_separation
+test_precompact_returns_before_slow_backend_finishes
+test_sessionstart_rejects_state_from_an_older_compact_event
 test_state_generation_fails_open
 test_claude_first_compaction_injects_at_sessionstart
 test_claude_sessionstart_does_not_inject_twice

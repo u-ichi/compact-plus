@@ -38,7 +38,18 @@ PRIMARY_CMD="${COMPACT_PLUS_PRIMARY_BACKEND-$DEFAULT_PRIMARY_BACKEND}"
 DEFAULT_FALLBACK_BACKEND='tmp=$(mktemp "${TMPDIR:-/tmp}/compact-plus-codex.XXXXXX"); { printf "%s\n\n" "$SYSTEM_PROMPT"; cat; } | codex exec --model gpt-5.3-codex-spark --sandbox read-only --skip-git-repo-check --dangerously-bypass-hook-trust --ignore-user-config --ephemeral --output-last-message "$tmp" - >/dev/null && cat "$tmp"; status=$?; rm -f "$tmp"; exit "$status"'
 FALLBACK_CMD="${COMPACT_PLUS_FALLBACK_BACKEND-$DEFAULT_FALLBACK_BACKEND}"
 
-INPUT=$(cat)
+WORKER_MODE=0
+WORKER_INPUT_FILE=""
+EVENT_ID=""
+if [[ "${1:-}" == "--worker" ]]; then
+  WORKER_MODE=1
+  WORKER_INPUT_FILE="${2:-}"
+  EVENT_ID="${3:-}"
+  [[ -n "$WORKER_INPUT_FILE" && -n "$EVENT_ID" && -f "$WORKER_INPUT_FILE" ]] || exit 0
+  INPUT=$(< "$WORKER_INPUT_FILE")
+else
+  INPUT=$(cat)
+fi
 SESSION_ID=$(compact_plus_artifact_key "$INPUT")
 TRANSCRIPT_PATH=$(printf '%s' "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null || true)
 TRIGGER=$(printf '%s' "$INPUT" | jq -r '.trigger // "unknown"' 2>/dev/null || printf 'unknown')
@@ -53,7 +64,26 @@ command -v jq >/dev/null 2>&1 || exit 0
 STATE_FILE="$STATE_DIR/$SESSION_ID.md"
 OFFSET_FILE="$OFFSET_DIR/$SESSION_ID"
 COUNTER_FILE="$COUNTER_DIR/$SESSION_ID"
-mkdir -p "$STATE_DIR" "$OFFSET_DIR" "$COUNTER_DIR" 2>/dev/null || true
+PENDING_FILE="$COMPACT_PLUS_PENDING_DIR/$SESSION_ID"
+mkdir -p "$STATE_DIR" "$OFFSET_DIR" "$COUNTER_DIR" "$COMPACT_PLUS_PENDING_DIR" 2>/dev/null || true
+
+if [[ "$WORKER_MODE" -eq 0 ]]; then
+  EVENT_ID="$(date +%s%N)-$$"
+  WORKER_INPUT_FILE=$(mktemp "$COMPACT_PLUS_PENDING_DIR/input.XXXXXX")
+  printf '%s' "$INPUT" > "$WORKER_INPUT_FILE"
+  MANUAL_READY=0
+  if [[ -f "$STATE_FILE" ]] && grep -q '^<!-- compact-plus-manual-ready -->$' "$STATE_FILE" 2>/dev/null; then
+    MANUAL_READY=1
+  fi
+  PENDING_TMP=$(mktemp "$COMPACT_PLUS_PENDING_DIR/event.XXXXXX")
+  printf '%s\n%s\n' "$EVENT_ID" "$MANUAL_READY" > "$PENDING_TMP"
+  mv "$PENDING_TMP" "$PENDING_FILE"
+  nohup bash "$0" --worker "$WORKER_INPUT_FILE" "$EVENT_ID" </dev/null >/dev/null 2>&1 &
+  exit 0
+fi
+
+trap 'rm -f "$WORKER_INPUT_FILE" 2>/dev/null || true' EXIT
+[[ "$(sed -n '1p' "$PENDING_FILE" 2>/dev/null)" == "$EVENT_ID" ]] || exit 0
 
 cap_bytes() {
   local kb="$1"
@@ -409,9 +439,10 @@ USER_PROMPT=$(build_user_prompt "$MODE" "$EVENTS")
 
 OUTPUT=$(run_backends "$USER_PROMPT" || true)
 [[ -n "$OUTPUT" ]] || exit 0
+[[ "$(sed -n '1p' "$PENDING_FILE" 2>/dev/null)" == "$EVENT_ID" ]] || exit 0
 
 TMP_FILE=$(mktemp "${TMPDIR:-/tmp}/compact-plus-state.XXXXXX") # lint:allow-os-tmp
-printf '%s\n' "$OUTPUT" > "$TMP_FILE"
+printf '%s\n' "$OUTPUT" | awk -v event="$EVENT_ID" 'NR == 1 { print; print "<!-- compact-plus-event: " event " -->"; next } { print }' > "$TMP_FILE"
 mv "$TMP_FILE" "$STATE_FILE" 2>/dev/null || true
 printf '%s\n' "$TRANSCRIPT_SIZE" > "$OFFSET_FILE" 2>/dev/null || true
 printf '%s\n' "$CALL_COUNT" > "$COUNTER_FILE" 2>/dev/null || true

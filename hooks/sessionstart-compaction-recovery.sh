@@ -51,9 +51,9 @@ compact_plus_mtime_epoch() {
   return 1
 }
 
-# When PreCompact's backend fails, the previous compaction's state file is left in
-# place and injected again. Stating when it was written lets the reader judge how
-# current it is instead of assuming it describes the work just compacted.
+# When the detached PreCompact worker fails, the previous compaction's state file
+# remains on disk but its event token does not match the pending compact event, so
+# recovery uses the transcript backup instead of presenting stale state as current.
 compact_plus_saved_at() {
   local epoch
   epoch=$(compact_plus_mtime_epoch "$1") || return 1
@@ -74,10 +74,23 @@ SOURCE=$(printf '%s' "$INPUT" | jq -r '.source // empty' 2>/dev/null)
 MARKER="$COMPACT_PLUS_MARKER_DIR/$SESSION_ID"
 INJECTED="$COMPACT_PLUS_INJECTED_DIR/$SESSION_ID"
 STATE_FILE="$COMPACT_PLUS_STATE_DIR/$SESSION_ID.md"
+PENDING_FILE="$COMPACT_PLUS_PENDING_DIR/$SESSION_ID"
+
+state_is_current() {
+  local event_id manual_ready state_event
+  [[ -f "$STATE_FILE" && -f "$PENDING_FILE" ]] || return 1
+  event_id=$(sed -n '1p' "$PENDING_FILE" 2>/dev/null || true)
+  manual_ready=$(sed -n '2p' "$PENDING_FILE" 2>/dev/null || true)
+  state_event=$(grep -m 1 '^<!-- compact-plus-event: ' "$STATE_FILE" 2>/dev/null || true)
+  [[ -n "$event_id" ]] || return 1
+  [[ "$state_event" == "<!-- compact-plus-event: $event_id -->" ]] && return 0
+  [[ "$manual_ready" == "1" ]] && grep -q '^<!-- compact-plus-manual-ready -->$' "$STATE_FILE" 2>/dev/null
+}
 
 # Decide which order this is before producing any output.
 CONSUME_MARKER=0
 WRITE_INJECTED=0
+STATE_CURRENT=0
 if [[ -f "$MARKER" ]]; then
   # Codex order. An injected mark alongside the marker is abnormal; clear both so
   # the pair cannot trigger a second injection later.
@@ -85,6 +98,8 @@ if [[ -f "$MARKER" ]]; then
 elif [[ ! -f "$STATE_FILE" ]]; then
   # Nothing was saved for this thread, so there is nothing to inject and
   # PostCompact still arms the marker for the fallback.
+  exit 0
+elif ! state_is_current; then
   exit 0
 elif [[ -f "$INJECTED" && ! "$STATE_FILE" -nt "$INJECTED" ]]; then
   # The mark is at least as new as the state it covers, so this compaction was
@@ -98,6 +113,9 @@ else
   # never ran. Either way the state file is newer than any mark, so it has not
   # been delivered yet.
   WRITE_INJECTED=1
+fi
+if state_is_current; then
+  STATE_CURRENT=1
 fi
 
 # Read the active plan path from the session pointer file.
@@ -115,7 +133,7 @@ if [[ -n "$PLAN_FILE" ]]; then
   CTX+=$'\n'"Re-read that plan and preserve its current phase and constraints."
 fi
 
-if [[ -f "$STATE_FILE" ]]; then
+if [[ -f "$STATE_FILE" && "$STATE_CURRENT" -eq 1 ]]; then
   SAVED_AT=$(compact_plus_saved_at "$STATE_FILE" || true)
   if [[ -n "$SAVED_AT" ]]; then
     CTX+=$'\n'"State saved at: ${SAVED_AT} (if this predates the work just compacted, state generation failed and this is the previous snapshot)."
@@ -148,7 +166,7 @@ if jq -n --arg ctx "$CTX" '{
   }
 }'; then
   if [[ "$CONSUME_MARKER" -eq 1 ]]; then
-    rm -f "$MARKER" "$INJECTED" 2>/dev/null || true
+    rm -f "$MARKER" "$INJECTED" "$PENDING_FILE" 2>/dev/null || true
   fi
   if [[ "$WRITE_INJECTED" -eq 1 ]]; then
     mkdir -p "$COMPACT_PLUS_INJECTED_DIR" 2>/dev/null || true

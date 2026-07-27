@@ -22,8 +22,9 @@ SESSION_ID=$(compact_plus_artifact_key "$INPUT")
 # writing a marker, otherwise UserPromptSubmit would inject the same state a
 # second time on the next prompt.
 INJECTED="$COMPACT_PLUS_INJECTED_DIR/$SESSION_ID"
+PENDING_FILE="$COMPACT_PLUS_PENDING_DIR/$SESSION_ID"
 if [[ -f "$INJECTED" ]]; then
-  rm -f "$INJECTED" 2>/dev/null || true
+  rm -f "$INJECTED" "$PENDING_FILE" 2>/dev/null || true
 else
   # Write the marker file. The recovery hook that runs next consumes it once.
   MARKER_DIR="$COMPACT_PLUS_MARKER_DIR"
