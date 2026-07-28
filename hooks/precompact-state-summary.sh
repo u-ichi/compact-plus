@@ -110,7 +110,10 @@ extract_tool_name() {
 extract_refs() {
   local json="$1"
   local refs
-  refs=$(printf '%s' "$json" | jq -r '.. | strings | select(test("(/[^[:space:]\"'\'']+|https?://[^[:space:]\"'\'']+)"))' 2>/dev/null | head -n 5 | tr '\n' ' ' || true)
+  # Native Windows jq builds end every output line with CRLF. `tr '\n' ' '`
+  # replaces the LF and leaves the CR, so the joined refs would carry embedded
+  # control characters into the state file. Drop the CR before joining.
+  refs=$(printf '%s' "$json" | jq -r '.. | strings | select(test("(/[^[:space:]\"'\'']+|https?://[^[:space:]\"'\'']+)"))' 2>/dev/null | head -n 5 | tr -d '\r' | tr '\n' ' ' || true)
   refs=${refs% }
   printf '%s' "${refs:-unknown path}"
 }
