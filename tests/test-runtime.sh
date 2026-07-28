@@ -111,6 +111,30 @@ write_squash_fixture() {
   done
 }
 
+# Claude Code puts the tool name on the tool_use line and the output on a
+# separate tool_result line, joined by tool_use_id. No line carries a top-level
+# tool_name, so a reader that only sees one line at a time resolves nothing.
+write_claude_shape_fixture() {
+  local path="$1"
+  local read_text bash_text
+  read_text=$(awk 'BEGIN { for (i = 1; i <= 150; i++) printf "F:/x/read line %d\n", i }')
+  bash_text=$(awk 'BEGIN { for (i = 1; i <= 60; i++) printf "bash output chunk %d\n", i }')
+  : > "$path"
+  # Over budget, and the pair is split by an unrelated line as it is in practice.
+  jq -nc '{type:"assistant", message:{content:[{type:"tool_use", id:"toolu_bash", name:"Bash", input:{}}]}}' >> "$path"
+  jq -nc '{type:"attachment"}' >> "$path"
+  jq -nc --arg t "$bash_text" '{type:"user", message:{content:[{type:"tool_result", tool_use_id:"toolu_bash", content:$t}]}}' >> "$path"
+  # Over the line budget.
+  jq -nc '{type:"assistant", message:{content:[{type:"tool_use", id:"toolu_read", name:"Read", input:{}}]}}' >> "$path"
+  jq -nc --arg t "$read_text" '{type:"user", message:{content:[{type:"tool_result", tool_use_id:"toolu_read", content:$t}]}}' >> "$path"
+  # Under budget: resolved, but left alone.
+  jq -nc '{type:"assistant", message:{content:[{type:"tool_use", id:"toolu_small", name:"Bash", input:{}}]}}' >> "$path"
+  jq -nc '{type:"user", message:{content:[{type:"tool_result", tool_use_id:"toolu_small", content:"ok"}]}}' >> "$path"
+  # Its tool_use is outside the slice: unresolvable, must pass through untouched.
+  jq -nc --arg t "$bash_text" '{type:"user", message:{content:[{type:"tool_result", tool_use_id:"toolu_absent", content:$t}]}}' >> "$path"
+  jq -nc '{type:"user", message:{content:[{type:"text", text:"plain turn"}]}}' >> "$path"
+}
+
 make_squash_probe() {
   local path="$1"
   cat > "$path" <<'EOF'
@@ -131,6 +155,10 @@ COMPACT_PLUS_TRANSCRIPT_HEAD_TURNS=5
 COMPACT_PLUS_TRANSCRIPT_TAIL_TURNS=25
 COMPACT_PLUS_TRANSCRIPT_HEAD_KB=10
 COMPACT_PLUS_TRANSCRIPT_TAIL_KB=40
+
+# process_transcript_stream reads this; the hook sets it at the top level, which
+# the function-only extraction below does not carry over.
+SQUASH_JQ="$(cd "$(dirname "$HOOK")" && pwd)/squash.jq"
 
 # The hook reads stdin and runs to completion when sourced, so take only its
 # top-level function definitions.
@@ -178,8 +206,11 @@ else
 fi
 
 in_lines=$(wc -l < "$FIXTURE" | tr -d ' ')
-out_lines=$(process_transcript_stream < "$FIXTURE" | wc -l | tr -d ' ')
-printf 'line-count: %s/%s\n' "$out_lines" "$in_lines"
+squashed=$(process_transcript_stream < "$FIXTURE" > "$FIXTURE.out"; wc -l < "$FIXTURE.out" | tr -d ' ')
+printf 'line-count: %s/%s\n' "$squashed" "$in_lines"
+printf 'squashed: %s\n' "$(grep -c '^\[' "$FIXTURE.out" || true)"
+printf 'unresolved-passthrough: %s\n' "$(grep -c 'toolu_absent' "$FIXTURE.out" || true)"
+rm -f "$FIXTURE.out"
 EOF
 }
 
@@ -194,6 +225,20 @@ test_squash_slicing_is_order_independent() {
   assert_contains "$output" "line-count: 40/40" "Squashing emits exactly one line per input line"
   assert_contains "$output" "head-tail: same" "Slicing before squashing leaves semantic_head_tail output unchanged"
   assert_contains "$output" "tail: same" "Slicing before squashing leaves semantic_tail output unchanged"
+}
+
+test_squash_resolves_claude_tool_names() {
+  local fixture="$TEST_ROOT/claude-shape-fixture.jsonl"
+  local probe="$TEST_ROOT/claude-shape-probe.sh"
+  local output
+  write_claude_shape_fixture "$fixture"
+  make_squash_probe "$probe"
+
+  output=$(bash "$probe" "$ROOT/hooks/precompact-state-summary.sh" "$fixture")
+  assert_contains "$output" "line-count: 9/9" "Claude-shaped input emits one line per input line"
+  assert_contains "$output" "squashed: 2" "Tool names resolved through tool_use_id are squashed"
+  assert_contains "$output" "unresolved-passthrough: 1" "A tool_result without its tool_use passes through"
+  assert_contains "$output" "head-tail: same" "Claude-shaped slicing stays order independent"
 }
 
 test_claude_warning_threshold_is_independent() {
@@ -689,6 +734,7 @@ test_codex_root_thread_recovers_once() {
 
 test_codex_manifest
 test_squash_slicing_is_order_independent
+test_squash_resolves_claude_tool_names
 test_session_id_priority
 test_runtime_auto_detection
 test_claude_warning_threshold_is_independent

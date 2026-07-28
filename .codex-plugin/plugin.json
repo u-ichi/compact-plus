@@ -1,6 +1,6 @@
 {
   "name": "compact-plus",
-  "version": "1.3.2",
+  "version": "1.4.0",
   "description": "Preserve Claude Code and Codex session state around context compaction.",
   "author": {
     "name": "u1"

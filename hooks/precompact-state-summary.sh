@@ -10,6 +10,7 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "$SCRIPT_DIR/../scripts/runtime-paths.sh"
 COMPACT_PLUS_PLUGIN_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 PROMPT_FILE="$COMPACT_PLUS_PLUGIN_ROOT/prompts/state-summary.md"
+SQUASH_JQ="$COMPACT_PLUS_PLUGIN_ROOT/hooks/squash.jq"
 
 STATE_DIR="$COMPACT_PLUS_STATE_DIR"
 OFFSET_DIR="$COMPACT_PLUS_OFFSET_DIR"
@@ -167,17 +168,58 @@ process_json_line() {
   printf '%s\n' "$json"
 }
 
+# Squash the slice in a single jq pass (see squash.jq). Resolving a tool_result's
+# tool name requires the tool_use line that precedes it, which a per-line reader
+# has already consumed, so the whole slice has to be visible at once.
+#
+# jq needs a seekable input so a parse failure can fall back to the per-line
+# reader: a single unparsable line aborts the entire jq invocation, while the
+# per-line reader passes such lines through untouched.
+#
+# tr strips the CR that a native Windows jq build appends to every output line.
+# The per-line reader never saw it because it routed jq through a command
+# substitution, which swallowed it.
 process_transcript_stream() {
+  if [[ ! -f "$SQUASH_JQ" ]]; then
+    process_transcript_stream_per_line
+    return
+  fi
+
+  local buf out
+  buf=$(mktemp "${TMPDIR:-/tmp}/compact-plus-stream.XXXXXX") # lint:allow-os-tmp
+  out=$(mktemp "${TMPDIR:-/tmp}/compact-plus-squash.XXXXXX") # lint:allow-os-tmp
+  cat > "$buf"
+
+  if jq -c -r -s -f "$SQUASH_JQ" \
+       --arg squash_enabled "$COMPACT_PLUS_SQUASH_ENABLED" \
+       --arg read_lines "$COMPACT_PLUS_SQUASH_READ_LINES" \
+       --arg bash_chars "$COMPACT_PLUS_SQUASH_BASH_CHARS" \
+       "$buf" > "$out" 2>/dev/null; then
+    tr -d '\r' < "$out"
+  else
+    process_transcript_stream_per_line < "$buf"
+  fi
+
+  rm -f "$buf" "$out" 2>/dev/null || true
+}
+
+# Fallback for input jq cannot parse. Cannot resolve tool names (see squash.jq),
+# so it squashes only lines that carry the name themselves.
+process_transcript_stream_per_line() {
   while IFS= read -r line || [[ -n "$line" ]]; do
     process_json_line "$line"
   done
 }
 
 # Squashing is per line and order preserving, so selecting the head/tail lines
-# before squashing yields the same result as squashing the whole transcript
-# first. Selecting first keeps the work proportional to the requested turns
-# instead of the transcript size, which matters because process_json_line
-# forks several jq processes per line.
+# before squashing keeps the work proportional to the requested turns instead of
+# the transcript size.
+#
+# It is not fully equivalent to squashing the whole transcript first: a tool name
+# is resolved through the tool_use line that shares the slice, so a pair split by
+# the head/tail boundary stays unresolved here and would have been resolved by a
+# whole-transcript pass. An unresolved line is emitted untouched, so slicing
+# first can squash less, never differently.
 semantic_head_tail() {
   local path="$1"
   local head_part tail_part
