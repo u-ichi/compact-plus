@@ -62,6 +62,8 @@ Writing policy:
 - Write in English.
 - Keep the heading strings exactly as specified.
 - Report facts supported by the input. Do not invent missing details.
+- In every section, label failures or blockers found only in Existing state, without supporting new events, as `Carried forward from previous state (not verified in current input)`. Preserve their diagnostic details, but do not describe them as `BLOCKING`, confirmed current blockers, or resolved.
+- Use `BLOCKING` only when new events establish that an item currently prevents remaining work. Update inherited failures and blockers when new events confirm, resolve, or supersede them.
 - Do not write imperatives such as "run X next" or "you should"; express unfinished work as factual state.
 - Preserve paths, URLs, command names, commit ids, pane ids, issue ids, and error messages when visible.
 - If an item cannot be verified from the input, write `Not verified`.
