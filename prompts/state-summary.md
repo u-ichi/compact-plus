@@ -20,7 +20,14 @@ Inputs are structured as:
 - New events since last compact: transcript head and tail, transcript tail, or transcript diff.
 - Skills and commands invoked this session: the mechanically extracted list of skills and slash commands invoked earlier in the session.
 
-Use internal update reasoning to add new decisions, blockers, files, workers, failures, or recovery facts introduced in new events; revise existing entries whose status, owner, file path, decision, blocker, or verification result changed; and keep existing facts that new events do not touch, especially facts matching the user's custom instructions. These internal operations correspond to ADD / UPDATE / PRESERVE, but those labels are not output format.
+Failure and blocker evidence policy:
+
+- A resolution explicitly recorded in Existing state remains a historical fact unless new events contradict it.
+- For every other inherited failure or blocker, only New events since last compact can establish its current status. Labels such as `BLOCKING`, `confirmed`, or `still failing` in Existing state are inherited claims, not new evidence.
+- Without supporting new events, replace inherited current-status wording (including `BLOCKING`, `still failing`, and `remains blocked`) with `Carried forward from previous state (not verified in current input)`. Do not merely append the qualification to a current-blocker claim. Apply this in every section, including Current Phase and Recovery Notes. Preserve commands and error details without asserting current blockage or a new resolution.
+- New events can confirm, resolve, or supersede an inherited failure. Use `BLOCKING` only when those events establish that it currently prevents remaining work.
+
+Use internal update reasoning to add new decisions, blockers, files, workers, failures, or recovery facts introduced in new events; revise existing entries whose status, owner, file path, decision, blocker, or verification result changed; and keep existing facts that new events do not touch, especially facts matching the user's custom instructions, subject to the evidence policy above. These internal operations correspond to ADD / UPDATE / PRESERVE, but those labels are not output format.
 
 Priority: honor user's custom_instructions if provided. Treat them as a relevance filter for what must survive compaction, while staying factual.
 
@@ -54,7 +61,7 @@ Section assignment:
 Internal two-pass process:
 
 1. Draft: generate the initial state summary.
-2. Self-critique: review the draft and ask, "If I lost my memory now, could the next agent continue seamlessly with just this?"
+2. Self-critique: review the draft and ask, "If I lost my memory now, could the next agent continue seamlessly with just this?" Check that each current-blocker claim has support in new events, inherited-only status wording has been replaced, and previously recorded resolutions remain historical facts.
 3. Revise: fix gaps found by the critique and output only the final revised state.
 
 Writing policy:
